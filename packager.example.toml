@@ -1,0 +1,45 @@
+# packager.toml mirrors the library one-to-one: [app] is `App`, [package.*] are the builders.
+# Paths are relative to this file.
+
+[app]
+name = "My App"
+identifier = "com.example.myapp"
+version = "1.4.0"
+# build_number = "812"            # CFBundleVersion; required for pre-release versions on macOS
+publisher = "Example Ltd"
+description = "Writes notes."
+copyright = "© 2026 Example Ltd"
+icon = "assets/icon.png"          # one PNG (1024×1024 ideally); .icns is generated
+url_schemes = ["myapp"]
+file_types = [{ extension = "md", name = "Markdown document" }]
+resources = [{ from = "dist/", to = "web" }]
+
+[app.binaries]
+macos-arm64 = "target/aarch64-apple-darwin/release/my-app"
+macos-x64 = "target/x86_64-apple-darwin/release/my-app"   # merged into a universal binary
+# macos-universal = "target/universal/release/my-app"
+
+[package.app]
+min_macos = "11.0"
+category = "public.app-category.productivity"
+# frameworks = ["vendor/Some.framework"]
+# info_plist = { NSMicrophoneUsageDescription = "For voice notes." }
+
+[package.dmg]
+# background = "assets/dmg.png"   # window takes its size; name it …@2x.png for Retina art
+icon_size = 128
+window_size = [540, 380]
+app_position = [140, 180]
+applications_position = [400, 180]
+
+[package.pkg]
+install_location = "/Applications"
+# postinstall = "scripts/postinstall"
+
+[sign.apple]
+identity = "-"                     # ad hoc; certificate identities aren't supported yet
+hardened_runtime = true
+# entitlements = "app.entitlements"
+
+[build]
+out_dir = "target/dist"
