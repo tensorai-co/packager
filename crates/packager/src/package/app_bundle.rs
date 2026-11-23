@@ -10,7 +10,7 @@ use crate::format::plist::{Dict, Value};
 use crate::identity::macos_versions;
 use crate::package::{file_name, Context, Package, PackageBuilder, PackageKind};
 use crate::sign::bundle::{sign_bundle, BundleSignOptions};
-use crate::sign::{Apple, AppleIdentity};
+use crate::sign::Apple;
 use crate::util::{copy_file, copy_tree};
 use crate::{Error, Result};
 
@@ -223,8 +223,8 @@ impl AppBundle {
         std::fs::write(&pkginfo, b"APPL????").at(&pkginfo)?;
 
         let opts = match apple {
-            Some(a) => BundleSignOptions { identity: a.application.clone(), hardened_runtime: a.hardened_runtime, entitlements: a.entitlements.clone() },
-            None => BundleSignOptions { identity: AppleIdentity::AdHoc, hardened_runtime: false, entitlements: None },
+            Some(a) => a.bundle_options(),
+            None => BundleSignOptions::ad_hoc(),
         };
         sign_bundle(&bundle, &opts)?;
         Ok(bundle)

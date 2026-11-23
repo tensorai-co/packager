@@ -9,7 +9,8 @@
 //!
 //! [`build`] ties them together from one platform-neutral [`App`].
 
-#![forbid(unsafe_code)]
+// `unsafe` only in `sign::keychain` (Security.framework FFI), which opts in explicitly.
+#![deny(unsafe_code)]
 
 pub mod app;
 mod build;
@@ -21,6 +22,7 @@ pub mod identity;
 pub mod image;
 pub mod package;
 pub mod sign;
+pub mod transport;
 pub mod util;
 
 pub use app::{App, Arch, FileType, Version};

@@ -76,6 +76,8 @@ pub struct Image {
     pub first_section_offset: u64,
     /// The SDK version from `LC_BUILD_VERSION` / `LC_VERSION_MIN_MACOSX` (`xxxx.yy.zz` nibbles).
     pub sdk_version: Option<u32>,
+    /// The minimum OS version, same encoding, with the platform (1 = macOS).
+    pub min_os: Option<(u32, u32)>,
 }
 
 impl Image {
@@ -101,6 +103,7 @@ impl Image {
             code_signature: None,
             first_section_offset: data.len() as u64,
             sdk_version: None,
+            min_os: None,
         };
         let end = 32 + sizeofcmds as usize;
         if end > data.len() {
@@ -142,8 +145,14 @@ impl Image {
                     }
                     img.segments.push(seg);
                 }
-                LC_BUILD_VERSION if size >= 24 => img.sdk_version = Some(le32(data, p + 16)),
-                LC_VERSION_MIN_MACOSX if size >= 16 => img.sdk_version = Some(le32(data, p + 12)),
+                LC_BUILD_VERSION if size >= 24 => {
+                    img.sdk_version = Some(le32(data, p + 16));
+                    img.min_os = Some((le32(data, p + 8), le32(data, p + 12)));
+                }
+                LC_VERSION_MIN_MACOSX if size >= 16 => {
+                    img.sdk_version = Some(le32(data, p + 12));
+                    img.min_os = Some((1, le32(data, p + 8)));
+                }
                 LC_CODE_SIGNATURE if size >= 16 => {
                     img.code_signature = Some((p, le32(data, p + 8), le32(data, p + 12)));
                 }

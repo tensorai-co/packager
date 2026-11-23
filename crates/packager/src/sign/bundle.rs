@@ -27,12 +27,24 @@ pub struct BundleSignOptions {
     pub hardened_runtime: bool,
     /// Entitlements for the outermost bundle's main executable only.
     pub entitlements: Option<Vec<u8>>,
+    /// Explicit requirements for the outermost bundle (`codesign -r`).
+    pub requirements: Option<String>,
+    /// RFC 3161 server for certificate signatures; `None` skips timestamping.
+    pub timestamp_url: Option<String>,
 }
 
 impl BundleSignOptions {
     /// Ad-hoc signing with no runtime options.
     pub fn ad_hoc() -> Self {
-        BundleSignOptions { identity: AppleIdentity::AdHoc, hardened_runtime: false, entitlements: None }
+        BundleSignOptions { identity: AppleIdentity::AdHoc, hardened_runtime: false, entitlements: None, requirements: None, timestamp_url: None }
+    }
+
+    /// Options for one Mach-O file inside the bundle.
+    fn code(&self, identifier: impl Into<String>) -> CodeSignOptions {
+        let mut o = CodeSignOptions::ad_hoc(identifier);
+        o.identity = self.identity.clone();
+        o.timestamp_url = self.timestamp_url.clone();
+        o
     }
 }
 
@@ -84,7 +96,12 @@ fn is_bundle_dir(path: &Path) -> bool {
 fn nested_record(signed: &Signed, cputypes: &[u32]) -> Dict {
     let mut order: Vec<usize> = (0..signed.cdhashes.len()).collect();
     order.sort_by_key(|&i| cputypes.get(i) != Some(&CPU_TYPE_ARM64));
-    let req = order.iter().map(|&i| format!("cdhash H\"{}\"", crate::crypto::hex(&signed.cdhashes[i][..20]))).collect::<Vec<_>>().join(" or ");
+    // Certificate-signed nested code is recorded by its designated requirement, ad-hoc code by
+    // its cdhashes.
+    let req = match &signed.designated {
+        Some(dr) => dr.clone(),
+        None => order.iter().map(|&i| format!("cdhash H\"{}\"", crate::crypto::hex(&signed.cdhashes[i][..20]))).collect::<Vec<_>>().join(" or "),
+    };
     Dict::new().with("cdhash", Value::Data(signed.cdhashes[order[0]][..20].to_vec())).with("requirement", req)
 }
 
@@ -156,8 +173,7 @@ fn sign_bundle_inner(bundle: &Path, opts: &BundleSignOptions, outermost: bool) -
                 let data = std::fs::read(&e.path).at(&e.path)?;
                 if is_nested_location(&rel) && macho::is_macho(&data) {
                     let stem = e.rel.file_stem().and_then(|s| s.to_str()).unwrap_or("code").to_string();
-                    let mut o = CodeSignOptions::ad_hoc(stem);
-                    o.identity = opts.identity.clone();
+                    let mut o = opts.code(stem);
                     let is_exe = macho::Image::parse(macho::slices(&data)?[0].data.as_slice()).map(|i| i.filetype == macho::MH_EXECUTE).unwrap_or(false);
                     o.hardened_runtime = opts.hardened_runtime && is_exe;
                     let (signed, types) = sign_file(&e.path, &o)?;
@@ -204,14 +220,12 @@ fn sign_bundle_inner(bundle: &Path, opts: &BundleSignOptions, outermost: bool) -
         .ok()
         .and_then(|s| macho::Image::parse(&s[0].data).ok())
         .is_some_and(|i| i.filetype == macho::MH_EXECUTE);
-    let o = CodeSignOptions {
-        identifier: lay.identifier.clone(),
-        identity: opts.identity.clone(),
-        hardened_runtime: opts.hardened_runtime && is_exe,
-        entitlements: if outermost { opts.entitlements.clone() } else { None },
-        info_plist: Some(info),
-        code_resources: Some(code_resources),
-    };
+    let mut o = opts.code(lay.identifier.clone());
+    o.hardened_runtime = opts.hardened_runtime && is_exe;
+    o.entitlements = if outermost { opts.entitlements.clone() } else { None };
+    o.requirements = if outermost { opts.requirements.clone() } else { None };
+    o.info_plist = Some(info);
+    o.code_resources = Some(code_resources);
     sign_file(&exe, &o)
 }
 

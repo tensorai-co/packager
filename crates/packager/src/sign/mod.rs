@@ -6,34 +6,61 @@
 
 pub mod apple;
 pub mod bundle;
-pub mod der;
+pub mod cms;
+pub mod disk_image;
+#[cfg(target_os = "macos")]
+pub mod keychain;
+pub mod requirement;
+pub mod signer;
+pub mod timestamp;
 
 use std::sync::Arc;
 
+use crate::crypto::hmac::HashAlg;
+use crate::crypto::keys::PublicKey;
+use crate::crypto::x509::Certificate;
 use crate::Result;
 
-/// A DER-encoded X.509 certificate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Certificate {
-    /// The DER bytes.
-    pub der: Vec<u8>,
-}
-
-/// Signature algorithms a [`Signer`] may be asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureAlgorithm {
-    /// RSA PKCS#1 v1.5 over a SHA-256 digest.
-    RsaPkcs1Sha256,
-    /// ECDSA P-256 over a SHA-256 digest.
-    EcdsaP256Sha256,
-}
+pub use signer::KeySigner;
 
 /// A source of signatures: a key file, a token, an OS key store or a cloud service.
 pub trait Signer: Send + Sync {
-    /// The leaf certificate first, then intermediates.
+    /// The leaf certificate first, then intermediates (and the anchor, when known).
     fn certificate_chain(&self) -> &[Certificate];
-    /// Signs a digest the packager computed, so the key never leaves its HSM.
-    fn sign_digest(&self, digest: &[u8], alg: SignatureAlgorithm) -> Result<Vec<u8>>;
+    /// Signs a digest the packager computed, so the key never leaves its store. RSA keys return
+    /// PKCS#1 v1.5 signatures, EC keys a DER `Ecdsa-Sig-Value`.
+    fn sign_digest(&self, digest: &[u8], hash: HashAlg) -> Result<Vec<u8>>;
+}
+
+impl<'a> dyn Signer + 'a {
+    /// The leaf certificate.
+    pub fn leaf(&self) -> Option<&Certificate> {
+        self.certificate_chain().first()
+    }
+    /// The `AlgorithmIdentifier` (DER) of this signer's signatures with `hash`.
+    pub fn signature_algorithm(&self, hash: HashAlg) -> Vec<u8> {
+        use crate::crypto::der::{self, oids};
+        match self.leaf().map(|c| &c.public_key) {
+            Some(PublicKey::Ec(_)) => der::seq(&[&der::oid(if hash == HashAlg::Sha384 { oids::ECDSA_SHA384 } else { oids::ECDSA_SHA256 })]),
+            _ => {
+                let o = match hash {
+                    HashAlg::Sha1 => oids::SHA1_WITH_RSA,
+                    HashAlg::Sha256 => oids::SHA256_WITH_RSA,
+                    HashAlg::Sha384 => oids::SHA384_WITH_RSA,
+                    HashAlg::Sha512 => oids::SHA512_WITH_RSA,
+                };
+                der::seq(&[&der::oid(o), &der::null()])
+            }
+        }
+    }
+    /// The most bytes a signature from this signer can take.
+    pub fn max_signature_len(&self) -> usize {
+        match self.leaf().map(|c| &c.public_key) {
+            Some(PublicKey::Rsa(k)) => k.size(),
+            Some(PublicKey::Ec(k)) => 2 * k.curve.size() + 9,
+            None => 512,
+        }
+    }
 }
 
 /// The identity an Apple signature is made with.
@@ -42,7 +69,7 @@ pub enum AppleIdentity {
     /// An ad-hoc signature: hashes only, no certificate. Enough to run locally (Apple Silicon
     /// refuses unsigned code), not enough for Gatekeeper or notarization.
     AdHoc,
-    /// A certificate-backed identity (Developer ID Application, Apple Distribution…).
+    /// A certificate-backed identity (Developer ID Application, Apple Development…).
     Signer(Arc<dyn Signer>),
 }
 
@@ -50,9 +77,23 @@ impl std::fmt::Debug for AppleIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AppleIdentity::AdHoc => f.write_str("AdHoc"),
-            AppleIdentity::Signer(_) => f.write_str("Signer(..)"),
+            AppleIdentity::Signer(s) => write!(f, "Signer({:?})", s.leaf().and_then(|c| c.common_name())),
         }
     }
+}
+
+/// Whether and where secure timestamps come from.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Timestamp {
+    /// What `codesign` does: Apple's server for Developer ID signatures, none otherwise.
+    #[default]
+    Auto,
+    /// Never timestamp (`--timestamp=none`).
+    None,
+    /// Always use Apple's server (`--timestamp`), which notarization requires.
+    Apple,
+    /// An RFC 3161 server at this URL.
+    Url(String),
 }
 
 /// How Apple code is signed: the identity for binaries, bundles and disk images, the optional
@@ -67,16 +108,20 @@ pub struct Apple {
     pub hardened_runtime: bool,
     /// Entitlements plist (XML) for the main executable.
     pub entitlements: Option<Vec<u8>>,
+    /// Secure timestamps.
+    pub timestamp: Timestamp,
+    /// Explicit requirements (`codesign -r`), in the requirement language.
+    pub requirements: Option<String>,
 }
 
 impl Apple {
     /// Ad-hoc signing: what local builds and CI without certificates use.
     pub fn ad_hoc() -> Self {
-        Apple { application: AppleIdentity::AdHoc, installer: None, hardened_runtime: false, entitlements: None }
+        Apple { application: AppleIdentity::AdHoc, installer: None, hardened_runtime: false, entitlements: None, timestamp: Timestamp::Auto, requirements: None }
     }
-    /// Signing with a Developer ID Application identity.
+    /// Signing with a certificate identity (Developer ID Application, Apple Development…).
     pub fn developer_id(signer: Arc<dyn Signer>) -> Self {
-        Apple { application: AppleIdentity::Signer(signer), installer: None, hardened_runtime: false, entitlements: None }
+        Apple { application: AppleIdentity::Signer(signer), ..Apple::ad_hoc() }
     }
     /// The identity for `.pkg` files.
     pub fn installer(mut self, signer: Arc<dyn Signer>) -> Self {
@@ -86,6 +131,16 @@ impl Apple {
     /// Turns on the hardened runtime.
     pub fn hardened_runtime(mut self) -> Self {
         self.hardened_runtime = true;
+        self
+    }
+    /// Sets the timestamp policy.
+    pub fn timestamp(mut self, t: Timestamp) -> Self {
+        self.timestamp = t;
+        self
+    }
+    /// Explicit requirements in the requirement language.
+    pub fn requirements(mut self, text: impl Into<String>) -> Self {
+        self.requirements = Some(text.into());
         self
     }
     /// Entitlements for the main executable, read from an XML or binary plist file.
@@ -102,5 +157,31 @@ impl Apple {
     pub fn entitlements_xml(mut self, xml: impl Into<Vec<u8>>) -> Self {
         self.entitlements = Some(xml.into());
         self
+    }
+
+    /// The timestamp server this configuration resolves to for `identity`, if any.
+    pub fn timestamp_url(&self, identity: &AppleIdentity) -> Option<String> {
+        let AppleIdentity::Signer(s) = identity else { return None };
+        match &self.timestamp {
+            Timestamp::None => None,
+            Timestamp::Apple => Some(timestamp::APPLE_TSA.to_string()),
+            Timestamp::Url(u) => Some(u.clone()),
+            Timestamp::Auto => {
+                let devid = crate::crypto::der::oid_from_str(requirement::apple_oids::DEVELOPER_ID_LEAF).ok();
+                let is_devid = s.leaf().zip(devid).is_some_and(|(c, o)| c.extension(&o).is_some());
+                is_devid.then(|| timestamp::APPLE_TSA.to_string())
+            }
+        }
+    }
+
+    /// Options for signing a bundle with the application identity.
+    pub fn bundle_options(&self) -> bundle::BundleSignOptions {
+        bundle::BundleSignOptions {
+            identity: self.application.clone(),
+            hardened_runtime: self.hardened_runtime,
+            entitlements: self.entitlements.clone(),
+            requirements: self.requirements.clone(),
+            timestamp_url: self.timestamp_url(&self.application),
+        }
     }
 }

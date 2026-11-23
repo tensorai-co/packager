@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 
 use packager::package::{AppBundle, Dmg, Pkg};
-use packager::sign::Apple;
 use packager::{App, Arch};
 
 use crate::toml::{self, Toml};
@@ -15,7 +14,7 @@ pub struct Config {
     pub dmg: Option<Dmg>,
     pub pkg: Option<Pkg>,
     pub app_package: bool,
-    pub apple: Option<Apple>,
+    pub apple: Option<packager::sign::Apple>,
     pub out_dir: PathBuf,
 }
 
@@ -196,19 +195,34 @@ pub fn load(path: &Path) -> Result<Config, String> {
     let apple = match root.get("sign").and_then(|s| s.get("apple")) {
         None => None,
         Some(sa) => {
-            check_keys(sa, &["identity", "hardened_runtime", "entitlements"], "sign.apple")?;
+            check_keys(sa, &["identity", "hardened_runtime", "entitlements", "timestamp", "requirements"], "sign.apple")?;
             let identity = s(sa, "identity", "sign.apple")?.unwrap_or("-");
-            if identity != "-" {
-                return Err(format!(
-                    "sign.apple.identity = \"{identity}\": certificate-backed signing (Developer ID) isn't implemented yet; use \"-\" (ad hoc)"
-                ));
-            }
-            let mut ap = Apple::ad_hoc();
+            let identity = match identity.strip_prefix("p12:") {
+                // Paths in identity specs are relative to packager.toml too.
+                Some(p) => format!("p12:{}", rel(p).display()),
+                None => match identity.strip_prefix("pem:").and_then(|p| p.split_once(',')) {
+                    Some((c, k)) => format!("pem:{},{}", rel(c).display(), rel(k).display()),
+                    None => identity.to_string(),
+                },
+            };
+            let mut ap = packager::sign::Apple::ad_hoc();
+            ap.application = crate::codesign::identity(&identity, None)?;
             if sa.get("hardened_runtime").and_then(Toml::as_bool) == Some(true) {
                 ap = ap.hardened_runtime();
             }
             if let Some(e) = s(sa, "entitlements", "sign.apple")? {
                 ap = ap.entitlements(rel(e)).map_err(|e| e.to_string())?;
+            }
+            if let Some(t) = s(sa, "timestamp", "sign.apple")? {
+                ap = ap.timestamp(match t {
+                    "auto" => packager::sign::Timestamp::Auto,
+                    "none" => packager::sign::Timestamp::None,
+                    "apple" => packager::sign::Timestamp::Apple,
+                    url => packager::sign::Timestamp::Url(url.to_string()),
+                });
+            }
+            if let Some(r) = s(sa, "requirements", "sign.apple")? {
+                ap = ap.requirements(r);
             }
             Some(ap)
         }

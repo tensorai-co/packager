@@ -3,10 +3,16 @@
 //!
 //! The layout follows what `codesign` writes, so `codesign --verify --strict` accepts it.
 
-use crate::crypto::{sha256, Sha256};
+use std::sync::Arc;
+
+use crate::crypto::der;
+use crate::crypto::hmac::HashAlg;
+use crate::crypto::sha256;
 use crate::format::macho::{self, Image, MH_EXECUTE};
 use crate::format::plist::Value;
-use crate::sign::{der, AppleIdentity};
+use crate::sign::requirement::{self, RequirementType};
+use crate::sign::{cms, timestamp, AppleIdentity, Signer};
+use crate::transport::{Curl, Transport};
 use crate::util::PutBe;
 use crate::{Error, Result};
 
@@ -23,6 +29,7 @@ const CSSLOT_REQUIREMENTS: usize = 2;
 const CSSLOT_RESOURCEDIR: usize = 3;
 const CSSLOT_ENTITLEMENTS: usize = 5;
 const CSSLOT_DER_ENTITLEMENTS: usize = 7;
+const CSSLOT_ALTERNATE_CODEDIRECTORIES: u32 = 0x1000;
 const CSSLOT_SIGNATURESLOT: u32 = 0x10000;
 
 /// `CS_ADHOC`.
@@ -30,10 +37,11 @@ pub const CS_ADHOC: u32 = 0x2;
 /// `CS_RUNTIME` (hardened runtime).
 pub const CS_RUNTIME: u32 = 0x10000;
 const CS_EXECSEG_MAIN_BINARY: u64 = 0x1;
+const CS_HASHTYPE_SHA1: u8 = 1;
 const CS_HASHTYPE_SHA256: u8 = 2;
 
 /// What goes into one code signature.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodeSignOptions {
     /// The signing identifier (the bundle identifier for a bundle's main executable).
     pub identifier: String,
@@ -47,6 +55,25 @@ pub struct CodeSignOptions {
     pub info_plist: Option<Vec<u8>>,
     /// The bundle's `_CodeSignature/CodeResources` bytes, bound into special slot 3.
     pub code_resources: Option<Vec<u8>>,
+    /// Explicit requirements in the requirement language (`codesign -r`). Without them, ad-hoc
+    /// signatures carry an empty set and certificate signatures the designated requirement
+    /// `codesign` would derive.
+    pub requirements: Option<String>,
+    /// RFC 3161 server for certificate signatures; `None` skips timestamping.
+    pub timestamp_url: Option<String>,
+    /// Network access for timestamps.
+    pub transport: Arc<dyn Transport>,
+}
+
+impl std::fmt::Debug for CodeSignOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeSignOptions")
+            .field("identifier", &self.identifier)
+            .field("identity", &self.identity)
+            .field("hardened_runtime", &self.hardened_runtime)
+            .field("timestamp_url", &self.timestamp_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CodeSignOptions {
@@ -59,6 +86,9 @@ impl CodeSignOptions {
             entitlements: None,
             info_plist: None,
             code_resources: None,
+            requirements: None,
+            timestamp_url: None,
+            transport: Arc::new(Curl),
         }
     }
 }
@@ -70,6 +100,8 @@ pub struct Signed {
     pub data: Vec<u8>,
     /// One CodeDirectory hash (full SHA-256) per architecture, in file order.
     pub cdhashes: Vec<[u8; 32]>,
+    /// The embedded designated requirement's text, for certificate signatures.
+    pub designated: Option<String>,
 }
 
 impl Signed {
@@ -78,25 +110,57 @@ impl Signed {
     pub fn cdhash_requirement(&self) -> String {
         self.cdhashes.iter().map(|h| format!("cdhash H\"{}\"", crate::crypto::hex(&h[..20]))).collect::<Vec<_>>().join(" or ")
     }
+    /// The requirement `CodeResources` records for this code when nested: the embedded
+    /// designated requirement, or the cdhashes for ad-hoc code.
+    pub fn nested_requirement(&self) -> String {
+        self.designated.clone().unwrap_or_else(|| self.cdhash_requirement())
+    }
 }
 
 /// Signs every architecture of a Mach-O file. Any existing signature is replaced.
 pub fn sign_macho(input: &[u8], opts: &CodeSignOptions) -> Result<Signed> {
-    if let AppleIdentity::Signer(_) = opts.identity {
-        return Err(Error::Other(
-            "certificate-backed Apple signatures (CMS) aren't implemented yet; sign ad hoc for now".into(),
-        ));
-    }
+    let requirements = requirements_for(opts)?;
+    let designated = match &opts.identity {
+        AppleIdentity::AdHoc => None,
+        AppleIdentity::Signer(_) => requirement::parse_requirement_set(&requirements)?
+            .into_iter()
+            .find(|(t, _)| *t == RequirementType::Designated)
+            .map(|(_, e)| e.to_string()),
+    };
     let mut slices = macho::slices(input)?;
     let mut cdhashes = Vec::with_capacity(slices.len());
     for s in &mut slices {
-        let (data, cdhash) = sign_slice(std::mem::take(&mut s.data), opts)?;
+        let (data, cdhash) = sign_slice(std::mem::take(&mut s.data), opts, &requirements)?;
         s.data = data;
         cdhashes.push(cdhash);
     }
     let fat = slices.len() > 1;
     let data = if fat { macho::join_in_order(slices)? } else { slices.remove(0).data };
-    Ok(Signed { data, cdhashes })
+    Ok(Signed { data, cdhashes, designated })
+}
+
+/// The requirement set to embed: explicit, empty (ad hoc), or the derived designated requirement.
+fn requirements_for(opts: &CodeSignOptions) -> Result<Vec<u8>> {
+    if let Some(text) = &opts.requirements {
+        return Ok(requirement::requirement_set(&requirement::compile_set(text)?));
+    }
+    match &opts.identity {
+        AppleIdentity::AdHoc => Ok(empty_requirements()),
+        AppleIdentity::Signer(s) => {
+            let dr = requirement::designated(&opts.identifier, s.certificate_chain())?;
+            Ok(requirement::requirement_set(&[(RequirementType::Designated, dr)]))
+        }
+    }
+}
+
+/// Bytes to reserve for the CMS blob: certificates, signature, attributes, and a timestamp token.
+fn cms_reserve(signer: &dyn Signer, timestamped: bool) -> usize {
+    let certs: usize = signer.certificate_chain().iter().map(|c| c.der.len()).sum();
+    certs + signer.max_signature_len() + 1600 + if timestamped { 6144 } else { 0 }
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 fn blob(magic: u32, body: &[u8]) -> Vec<u8> {
@@ -154,34 +218,34 @@ fn der_value(v: &Value) -> Result<Vec<u8>> {
     })
 }
 
-fn sign_slice(mut data: Vec<u8>, opts: &CodeSignOptions) -> Result<(Vec<u8>, [u8; 32])> {
+fn sign_slice(mut data: Vec<u8>, opts: &CodeSignOptions, requirements: &[u8]) -> Result<(Vec<u8>, [u8; 32])> {
     let img = Image::parse(&data)?;
     let page_shift: u8 = if img.cputype == macho::CPU_TYPE_ARM64 { 14 } else { 12 };
     let page = 1usize << page_shift;
+    let signer: Option<&dyn Signer> = match &opts.identity {
+        AppleIdentity::AdHoc => None,
+        AppleIdentity::Signer(s) => Some(s.as_ref()),
+    };
+    let team_id = signer.and_then(|s| requirement::team_id(s.certificate_chain()));
 
-    let requirements = empty_requirements();
     let ent = opts.entitlements.as_ref().map(|x| blob(CSMAGIC_EMBEDDED_ENTITLEMENTS, x));
     let der_ent = match &opts.entitlements {
         Some(x) => Some(blob(CSMAGIC_EMBEDDED_DER_ENTITLEMENTS, &der_entitlements(x)?)),
         None => None,
     };
-    let cms = blob(CSMAGIC_BLOBWRAPPER, &[]);
 
-    let mut special: Vec<Option<[u8; 32]>> = vec![None; 8];
-    if let Some(p) = &opts.info_plist {
-        special[CSSLOT_INFOSLOT] = Some(sha256(p));
-    }
-    special[CSSLOT_REQUIREMENTS] = Some(sha256(&requirements));
-    if let Some(r) = &opts.code_resources {
-        special[CSSLOT_RESOURCEDIR] = Some(sha256(r));
-    }
-    if let Some(e) = &ent {
-        special[CSSLOT_ENTITLEMENTS] = Some(sha256(e));
-    }
-    if let Some(e) = &der_ent {
-        special[CSSLOT_DER_ENTITLEMENTS] = Some(sha256(e));
-    }
+    // What each special slot binds; hashed per CodeDirectory, in its own algorithm.
+    let mut special: Vec<Option<&[u8]>> = vec![None; 8];
+    special[CSSLOT_INFOSLOT] = opts.info_plist.as_deref();
+    special[CSSLOT_REQUIREMENTS] = Some(requirements);
+    special[CSSLOT_RESOURCEDIR] = opts.code_resources.as_deref();
+    special[CSSLOT_ENTITLEMENTS] = ent.as_deref();
+    special[CSSLOT_DER_ENTITLEMENTS] = der_ent.as_deref();
     let n_special = special.iter().rposition(|s| s.is_some()).unwrap_or(0);
+    // Like codesign: SHA-1 primary plus SHA-256 alternate for macOS deployment targets before
+    // 10.11.4, which can't check SHA-256 CodeDirectories; SHA-256 only otherwise.
+    let legacy = matches!(img.min_os, Some((1, v)) if v < 0x000a_0b04);
+    let algs: &[HashAlg] = if legacy { &[HashAlg::Sha1, HashAlg::Sha256] } else { &[HashAlg::Sha256] };
 
     // Where the signature goes decides how many pages are hashed; find it first.
     let code_limit = macho::reserve_signature(&mut data, 0)? as usize;
@@ -190,93 +254,127 @@ fn sign_slice(mut data: Vec<u8>, opts: &CodeSignOptions) -> Result<(Vec<u8>, [u8
     let version: u32 = if opts.hardened_runtime { 0x20500 } else { 0x20400 };
     let header_len = if version >= 0x20500 { 96 } else { 88 };
     let ident_len = opts.identifier.len() + 1;
-    let cd_len = header_len + ident_len + 32 * (n_special + n_code);
+    let team_len = team_id.as_ref().map_or(0, |t| t.len() + 1);
+    let hash_offset = |alg: HashAlg| header_len + ident_len + team_len + alg.len() * n_special;
+    let cd_len = |alg: HashAlg| hash_offset(alg) + alg.len() * n_code;
 
-    let mut blobs: Vec<(u32, usize)> = vec![(CSSLOT_CODEDIRECTORY, cd_len), (CSSLOT_REQUIREMENTS as u32, requirements.len())];
-    if let Some(e) = &ent {
-        blobs.push((CSSLOT_ENTITLEMENTS as u32, e.len()));
-    }
-    if let Some(e) = &der_ent {
-        blobs.push((CSSLOT_DER_ENTITLEMENTS as u32, e.len()));
-    }
-    blobs.push((CSSLOT_SIGNATURESLOT, cms.len()));
-    let sb_len = 12 + 8 * blobs.len() + blobs.iter().map(|b| b.1).sum::<usize>();
-    let reserved = sb_len.div_ceil(16) * 16;
-    let code_limit2 = macho::reserve_signature(&mut data, reserved as u32)? as usize;
-    debug_assert_eq!(code_limit, code_limit2);
-    let img = Image::parse(&data)?;
-    let text = img.segment("__TEXT");
-
-    let mut flags = match opts.identity {
-        AppleIdentity::AdHoc => CS_ADHOC,
-        AppleIdentity::Signer(_) => 0,
-    };
+    let mut flags = if signer.is_none() { CS_ADHOC } else { 0 };
     if opts.hardened_runtime {
         flags |= CS_RUNTIME;
     }
+    // The CMS blob's size isn't known until it's signed (and timestamped), but the header that
+    // holds the signature size is hashed. Reserve generously, and redo if it doesn't fit.
+    let mut cms_room = match signer {
+        Some(s) => cms_reserve(s, opts.timestamp_url.is_some()),
+        None => 8,
+    };
+    loop {
+        let mut fixed: Vec<usize> = algs.iter().map(|&a| cd_len(a)).collect();
+        fixed.push(requirements.len());
+        fixed.extend(ent.as_ref().map(|e| e.len()));
+        fixed.extend(der_ent.as_ref().map(|e| e.len()));
+        let n_blobs = fixed.len() + 1;
+        let reserved = (12 + 8 * n_blobs + fixed.iter().sum::<usize>() + cms_room).div_ceil(16) * 16;
+        let code_limit2 = macho::reserve_signature(&mut data, reserved as u32)? as usize;
+        debug_assert_eq!(code_limit, code_limit2);
+        let img = Image::parse(&data)?;
+        let text = img.segment("__TEXT");
 
-    let mut cd = Vec::with_capacity(cd_len);
-    cd.u32(CSMAGIC_CODEDIRECTORY);
-    cd.u32(cd_len as u32);
-    cd.u32(version);
-    cd.u32(flags);
-    cd.u32((header_len + ident_len + 32 * n_special) as u32); // hashOffset
-    cd.u32(header_len as u32); // identOffset
-    cd.u32(n_special as u32);
-    cd.u32(n_code as u32);
-    cd.u32(code_limit as u32);
-    cd.u8(32);
-    cd.u8(CS_HASHTYPE_SHA256);
-    cd.u8(0); // platform
-    cd.u8(page_shift);
-    cd.u32(0); // spare2
-    cd.u32(0); // scatterOffset
-    cd.u32(0); // teamOffset
-    cd.u32(0); // spare3
-    cd.u64(0); // codeLimit64
-    cd.u64(text.map(|t| t.fileoff).unwrap_or(0));
-    cd.u64(text.map(|t| t.filesize).unwrap_or(0));
-    cd.u64(if img.filetype == MH_EXECUTE { CS_EXECSEG_MAIN_BINARY } else { 0 });
-    if version >= 0x20500 {
-        cd.u32(img.sdk_version.unwrap_or(0)); // runtime
-        cd.u32(0); // preEncryptOffset
-    }
-    cd.extend_from_slice(opts.identifier.as_bytes());
-    cd.u8(0);
-    for slot in (1..=n_special).rev() {
-        cd.extend_from_slice(&special[slot].unwrap_or([0; 32]));
-    }
-    for chunk in data[..code_limit].chunks(page) {
-        let mut h = Sha256::new();
-        h.update(chunk);
-        cd.extend_from_slice(&h.finish());
-    }
-    debug_assert_eq!(cd.len(), cd_len);
-    let cdhash = sha256(&cd);
+        let build_cd = |alg: HashAlg| -> Vec<u8> {
+            let mut cd = Vec::with_capacity(cd_len(alg));
+            cd.u32(CSMAGIC_CODEDIRECTORY);
+            cd.u32(cd_len(alg) as u32);
+            cd.u32(version);
+            cd.u32(flags);
+            cd.u32(hash_offset(alg) as u32);
+            cd.u32(header_len as u32); // identOffset
+            cd.u32(n_special as u32);
+            cd.u32(n_code as u32);
+            cd.u32(code_limit as u32);
+            cd.u8(alg.len() as u8);
+            cd.u8(if alg == HashAlg::Sha1 { CS_HASHTYPE_SHA1 } else { CS_HASHTYPE_SHA256 });
+            cd.u8(0); // platform
+            cd.u8(page_shift);
+            cd.u32(0); // spare2
+            cd.u32(0); // scatterOffset
+            cd.u32(if team_id.is_some() { (header_len + ident_len) as u32 } else { 0 }); // teamOffset
+            cd.u32(0); // spare3
+            cd.u64(0); // codeLimit64
+            cd.u64(text.map(|t| t.fileoff).unwrap_or(0));
+            cd.u64(text.map(|t| t.filesize).unwrap_or(0));
+            cd.u64(if img.filetype == MH_EXECUTE { CS_EXECSEG_MAIN_BINARY } else { 0 });
+            if version >= 0x20500 {
+                cd.u32(img.sdk_version.unwrap_or(0)); // runtime
+                cd.u32(0); // preEncryptOffset
+            }
+            cd.extend_from_slice(opts.identifier.as_bytes());
+            cd.u8(0);
+            if let Some(t) = &team_id {
+                cd.extend_from_slice(t.as_bytes());
+                cd.u8(0);
+            }
+            for slot in (1..=n_special).rev() {
+                match special[slot] {
+                    Some(b) => cd.extend_from_slice(&alg.digest(b)),
+                    None => cd.extend(std::iter::repeat_n(0u8, alg.len())),
+                }
+            }
+            for chunk in data[..code_limit].chunks(page) {
+                cd.extend_from_slice(&alg.digest(chunk));
+            }
+            debug_assert_eq!(cd.len(), cd_len(alg));
+            cd
+        };
+        let cds: Vec<(HashAlg, Vec<u8>)> = algs.iter().map(|&a| (a, build_cd(a))).collect();
+        let cd = &cds[0].1;
+        // The cdhash that identifies this code: the SHA-256 CodeDirectory's.
+        let cdhash = sha256(&cds.last().map(|c| c.1.clone()).unwrap_or_default());
 
-    let mut sb = Vec::with_capacity(reserved);
-    sb.u32(CSMAGIC_EMBEDDED_SIGNATURE);
-    sb.u32(sb_len as u32);
-    sb.u32(blobs.len() as u32);
-    let mut off = 12 + 8 * blobs.len();
-    for (slot, len) in &blobs {
-        sb.u32(*slot);
-        sb.u32(off as u32);
-        off += len;
+        let cms_blob = match signer {
+            None => blob(CSMAGIC_BLOBWRAPPER, &[]),
+            Some(s) => {
+                let cd_hashes: Vec<cms::CdHash> = cds.iter().map(|(a, c)| cms::CdHash { hash: *a, digest: a.digest(c) }).collect();
+                let transport = opts.transport.clone();
+                let tsa = opts.timestamp_url.clone().map(|url| move |sig: &[u8]| timestamp::fetch(transport.as_ref(), &url, sig));
+                let tsa_ref: Option<cms::Timestamper> = tsa.as_ref().map(|f| f as cms::Timestamper);
+                blob(CSMAGIC_BLOBWRAPPER, &cms::sign(s, cd, &cd_hashes, now(), tsa_ref)?)
+            }
+        };
+        if cms_blob.len() > cms_room {
+            cms_room = cms_blob.len() + 1024;
+            continue;
+        }
+
+        let mut blobs: Vec<(u32, &[u8])> = vec![(CSSLOT_CODEDIRECTORY, cd), (CSSLOT_REQUIREMENTS as u32, requirements)];
+        if let Some(e) = &ent {
+            blobs.push((CSSLOT_ENTITLEMENTS as u32, e));
+        }
+        if let Some(e) = &der_ent {
+            blobs.push((CSSLOT_DER_ENTITLEMENTS as u32, e));
+        }
+        for (i, (_, c)) in cds.iter().enumerate().skip(1) {
+            blobs.push((CSSLOT_ALTERNATE_CODEDIRECTORIES + i as u32 - 1, c));
+        }
+        blobs.push((CSSLOT_SIGNATURESLOT, &cms_blob));
+        let sb_len = 12 + 8 * blobs.len() + blobs.iter().map(|b| b.1.len()).sum::<usize>();
+        let mut sb = Vec::with_capacity(reserved);
+        sb.u32(CSMAGIC_EMBEDDED_SIGNATURE);
+        sb.u32(sb_len as u32);
+        sb.u32(blobs.len() as u32);
+        let mut off = 12 + 8 * blobs.len();
+        for (slot, b) in &blobs {
+            sb.u32(*slot);
+            sb.u32(off as u32);
+            off += b.len();
+        }
+        for (_, b) in &blobs {
+            sb.extend_from_slice(b);
+        }
+        sb.resize(reserved, 0);
+        data.truncate(code_limit);
+        data.extend_from_slice(&sb);
+        return Ok((data, cdhash));
     }
-    sb.extend_from_slice(&cd);
-    sb.extend_from_slice(&requirements);
-    if let Some(e) = &ent {
-        sb.extend_from_slice(e);
-    }
-    if let Some(e) = &der_ent {
-        sb.extend_from_slice(e);
-    }
-    sb.extend_from_slice(&cms);
-    sb.resize(reserved, 0);
-    data.truncate(code_limit);
-    data.extend_from_slice(&sb);
-    Ok((data, cdhash))
 }
 
 /// What an embedded signature says about one architecture slice.
@@ -296,6 +394,12 @@ pub struct SliceSignature {
     pub special: Vec<(usize, [u8; 32])>,
     /// Whether a CMS signature (certificate-backed) is present.
     pub has_cms: bool,
+    /// The verified CMS signature (signer, chain, times), when certificate-backed.
+    pub cms: Option<cms::Verified>,
+    /// The team identifier in the CodeDirectory.
+    pub team_id: Option<String>,
+    /// The embedded requirement set.
+    pub requirements: Vec<(RequirementType, requirement::Expr)>,
     /// Embedded XML entitlements.
     pub entitlements: Option<Vec<u8>>,
 }
@@ -329,52 +433,82 @@ pub fn verify_macho(data: &[u8]) -> Result<Vec<SliceSignature>> {
         }
         let version = be(cd, 8)?;
         let flags = be(cd, 12)?;
-        let hash_off = be(cd, 16)? as usize;
         let ident_off = be(cd, 20)? as usize;
-        let n_special = be(cd, 24)? as usize;
-        let n_code = be(cd, 28)? as usize;
-        let code_limit = be(cd, 32)? as usize;
-        let (hash_size, hash_type, page_shift) = (cd[36] as usize, cd[37], cd[39]);
-        if hash_type != CS_HASHTYPE_SHA256 || hash_size != 32 {
-            return Err(bad(format!("{arch}: only SHA-256 CodeDirectories are checked")));
-        }
-        let page = 1usize << page_shift;
-        let code = s.data.get(..code_limit).ok_or_else(|| bad(format!("{arch}: code limit past end")))?;
-        if code.len().div_ceil(page) != n_code {
-            return Err(bad(format!("{arch}: page count mismatch")));
-        }
-        for (k, chunk) in code.chunks(page).enumerate() {
-            let want = cd.get(hash_off + 32 * k..hash_off + 32 * (k + 1)).ok_or_else(|| bad(format!("{arch}: truncated hashes")))?;
-            if sha256(chunk) != want {
-                return Err(bad(format!("{arch}: page {k} hash mismatch (the file changed after signing)")));
-            }
-        }
+        // Check every CodeDirectory (the primary and any alternates), each in its own hash.
+        let mut all_cds: Vec<&[u8]> = vec![cd];
+        all_cds.extend(blobs.range(CSSLOT_ALTERNATE_CODEDIRECTORIES..CSSLOT_ALTERNATE_CODEDIRECTORIES + 5).map(|(_, b)| *b));
         let mut special = Vec::new();
-        for slot in 1..=n_special {
-            let p = hash_off - 32 * slot;
-            let h: [u8; 32] = cd.get(p..p + 32).and_then(|x| x.try_into().ok()).ok_or_else(|| bad(format!("{arch}: truncated special slots")))?;
-            if h != [0; 32] {
-                special.push((slot, h));
+        let mut cdhash = sha256(cd);
+        for c in &all_cds {
+            if be(c, 0)? != CSMAGIC_CODEDIRECTORY {
+                return Err(bad(format!("{arch}: bad CodeDirectory magic")));
             }
-        }
-        for (slot, blob_slot) in [(CSSLOT_REQUIREMENTS, 2u32), (CSSLOT_ENTITLEMENTS, 5), (CSSLOT_DER_ENTITLEMENTS, 7)] {
-            if let Some(b) = blobs.get(&blob_slot) {
-                match special.iter().find(|(s, _)| *s == slot) {
-                    Some((_, h)) if *h == sha256(b) => {}
-                    _ => return Err(bad(format!("{arch}: special slot {slot} doesn't match its blob"))),
+            let hash_off = be(c, 16)? as usize;
+            let n_special = be(c, 24)? as usize;
+            let n_code = be(c, 28)? as usize;
+            let code_limit = be(c, 32)? as usize;
+            let (hash_size, hash_type, page_shift) = (c[36] as usize, c[37], c[39]);
+            let alg = match (hash_type, hash_size) {
+                (CS_HASHTYPE_SHA1, 20) => HashAlg::Sha1,
+                (CS_HASHTYPE_SHA256, 32) => HashAlg::Sha256,
+                _ => return Err(bad(format!("{arch}: unsupported CodeDirectory hash type {hash_type}"))),
+            };
+            let page = if page_shift == 0 { usize::MAX } else { 1usize << page_shift };
+            let code = s.data.get(..code_limit).ok_or_else(|| bad(format!("{arch}: code limit past end")))?;
+            if code.len().div_ceil(page.min(code.len().max(1))) != n_code && !(page == usize::MAX && n_code == 1) {
+                return Err(bad(format!("{arch}: page count mismatch")));
+            }
+            for (k, chunk) in code.chunks(page.min(code.len().max(1))).enumerate() {
+                let want = c.get(hash_off + hash_size * k..hash_off + hash_size * (k + 1)).ok_or_else(|| bad(format!("{arch}: truncated hashes")))?;
+                if alg.digest(chunk) != want {
+                    return Err(bad(format!("{arch}: page {k} hash mismatch (the file changed after signing)")));
+                }
+            }
+            let slot_hash = |slot: usize| c.get(hash_off - hash_size * slot..hash_off - hash_size * (slot - 1));
+            for (slot, blob_slot) in [(CSSLOT_REQUIREMENTS, 2u32), (CSSLOT_ENTITLEMENTS, 5), (CSSLOT_DER_ENTITLEMENTS, 7)] {
+                if let Some(b) = blobs.get(&blob_slot)
+                    && (slot > n_special || slot_hash(slot) != Some(&alg.digest(b)[..]))
+                {
+                    return Err(bad(format!("{arch}: special slot {slot} doesn't match its blob")));
+                }
+            }
+            if alg == HashAlg::Sha256 {
+                cdhash = sha256(c);
+                special.clear();
+                for slot in 1..=n_special {
+                    let h: [u8; 32] = slot_hash(slot).and_then(|x| x.try_into().ok()).ok_or_else(|| bad(format!("{arch}: truncated special slots")))?;
+                    if h != [0; 32] {
+                        special.push((slot, h));
+                    }
                 }
             }
         }
         let ident_end = cd[ident_off..].iter().position(|&b| b == 0).map(|p| ident_off + p).unwrap_or(cd.len());
         let has_cms = blobs.get(&CSSLOT_SIGNATURESLOT).is_some_and(|b| b.len() > 8);
+        let cms = match blobs.get(&CSSLOT_SIGNATURESLOT) {
+            Some(b) if b.len() > 8 => Some(cms::verify(&b[8..], cd).map_err(|e| bad(format!("{arch}: {e}")))?),
+            _ => None,
+        };
+        let team_off = if version >= 0x20200 { be(cd, 48)? as usize } else { 0 };
+        let team_id = (team_off != 0 && team_off < cd.len()).then(|| {
+            let end = cd[team_off..].iter().position(|&b| b == 0).map(|p| team_off + p).unwrap_or(cd.len());
+            String::from_utf8_lossy(&cd[team_off..end]).into_owned()
+        });
+        let requirements = match blobs.get(&(CSSLOT_REQUIREMENTS as u32)) {
+            Some(b) => requirement::parse_requirement_set(b)?,
+            None => Vec::new(),
+        };
         out.push(SliceSignature {
             arch,
             identifier: String::from_utf8_lossy(&cd[ident_off..ident_end]).into_owned(),
             flags,
             version,
-            cdhash: sha256(cd),
+            cdhash,
             special,
             has_cms,
+            cms,
+            team_id,
+            requirements,
             entitlements: blobs.get(&5).map(|b| b[8..].to_vec()),
         });
     }

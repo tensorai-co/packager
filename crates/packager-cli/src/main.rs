@@ -1,5 +1,6 @@
 //! `packager`: parses arguments and `packager.toml`, then calls the library's public API.
 
+mod codesign;
 mod config;
 mod toml;
 
@@ -7,21 +8,24 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use packager::format::{bom, cpio, macho, udif, xar};
-use packager::sign::apple::{verify_macho, CodeSignOptions, CS_ADHOC, CS_RUNTIME};
-use packager::sign::bundle::{sign_bundle, verify_bundle, BundleSignOptions};
+use packager::sign::apple::{verify_macho, CS_ADHOC, CS_RUNTIME};
+use packager::sign::bundle::verify_bundle;
 
 const USAGE: &str = "\
 packager — native macOS packages from scratch, no platform tools needed
 
 USAGE:
     packager build [--config packager.toml] [--only app,dmg,pkg] [--out DIR]
-    packager sign <file|bundle> [--identifier ID] [--entitlements FILE] [--hardened-runtime]
+    packager sign <file|bundle>... [-s IDENTITY | --p12 FILE | --cert FILE --key FILE]
+                  [-i ID] [--hardened-runtime] [--entitlements FILE] [-r REQS] [--timestamp[=URL|none]]
+    packager codesign …                codesign's own command line (sign, -v verify, -d display)
+    packager identities                code-signing identities in the keychain
     packager verify <file|bundle>      signatures and structure, without native tools
     packager inspect <file|bundle>     what's inside a .dmg, .pkg, .app or Mach-O file
     packager icns <icon.png> <out.icns>
     packager --version
 
-`sign` signs ad hoc (certificate-backed signing isn't implemented yet).";
+IDENTITY: `-` (ad hoc, the default), a keychain identity name/SHA-1, `p12:FILE`, `pem:CERT,KEY`.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -62,9 +66,6 @@ impl<'a> Args<'a> {
     fn value(&self, k: &str) -> Option<&'a str> {
         self.flags.iter().rev().find(|(f, _)| *f == k).and_then(|(_, v)| *v)
     }
-    fn has(&self, k: &str) -> bool {
-        self.flags.iter().any(|(f, _)| *f == k)
-    }
     fn check(&self, allowed: &[&str]) -> Result<(), String> {
         for (f, _) in &self.flags {
             if !allowed.contains(f) {
@@ -84,6 +85,8 @@ fn run(args: &[String]) -> Result<(), String> {
     match cmd.as_str() {
         "build" => build(rest),
         "sign" => sign(rest),
+        "codesign" => codesign::run(rest),
+        "identities" => identities(),
         "verify" => verify(rest),
         "inspect" => inspect(rest),
         "icns" => icns(rest),
@@ -144,32 +147,27 @@ fn build(args: &[String]) -> Result<(), String> {
 }
 
 fn sign(args: &[String]) -> Result<(), String> {
-    let a = Args::parse(args, &["identifier", "entitlements"])?;
-    a.check(&["identifier", "entitlements", "hardened-runtime"])?;
-    let [target] = a.positional[..] else { return Err(format!("sign takes one path\n\n{USAGE}")) };
-    let path = Path::new(target);
-    let entitlements = match a.value("entitlements") {
-        Some(e) => {
-            let bytes = std::fs::read(e).map_err(|err| format!("{e}: {err}"))?;
-            Some(packager::format::plist::Value::parse(&bytes).map_err(|err| err.to_string())?.to_xml().into_bytes())
-        }
-        None => None,
-    };
-    if path.is_dir() {
-        let opts = BundleSignOptions { hardened_runtime: a.has("hardened-runtime"), entitlements, ..BundleSignOptions::ad_hoc() };
-        let s = sign_bundle(path, &opts).map_err(|e| e.to_string())?;
-        println!("signed {} (ad hoc): {}", path.display(), s.cdhash_requirement());
-    } else {
-        let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let ident = a.value("identifier").map(String::from).unwrap_or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
-        let mut o = CodeSignOptions::ad_hoc(ident);
-        o.hardened_runtime = a.has("hardened-runtime");
-        o.entitlements = entitlements;
-        let s = packager::sign::apple::sign_macho(&data, &o).map_err(|e| e.to_string())?;
-        std::fs::write(path, &s.data).map_err(|e| format!("{}: {e}", path.display()))?;
-        println!("signed {} (ad hoc): {}", path.display(), s.cdhash_requirement());
+    let has_identity = args.iter().any(|a| a == "-s" || a.starts_with("--sign") || a.starts_with("--p12") || a.starts_with("--cert") || (a.starts_with("-s") && !a.starts_with("--")));
+    let mut a = args.to_vec();
+    if !has_identity {
+        a.splice(0..0, ["-s".to_string(), "-".to_string()]);
     }
+    codesign::run(&a)
+}
+
+#[cfg(target_os = "macos")]
+fn identities() -> Result<(), String> {
+    let list = packager::sign::keychain::list_identities().map_err(|e| e.to_string())?;
+    for (i, (sha1, name)) in list.iter().enumerate() {
+        println!("  {}) {sha1} \"{name}\"", i + 1);
+    }
+    println!("     {} identities found", list.len());
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn identities() -> Result<(), String> {
+    Err("keychain identities need macOS".into())
 }
 
 fn ext(path: &Path) -> String {

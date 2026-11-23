@@ -184,7 +184,18 @@ impl PackageBuilder for Dmg {
     fn build(&self, ctx: &mut Context) -> Result<Vec<Package>> {
         let app_path = ctx.signed_app()?;
         let path = self.write_from_app(ctx.app, &app_path, &ctx.out_dir)?;
-        // Disk-image signatures need a certificate (CMS); the app inside is signed.
-        Ok(vec![Package::file(PackageKind::Dmg, macos_arch_label(ctx.app), path, false)?])
+        // Order: the app inside was signed first; now the image itself, with the same identity
+        // (ad-hoc builds leave the image unsigned, as codesign users do).
+        let mut signed = false;
+        if let Some(apple) = ctx.apple
+            && let crate::sign::AppleIdentity::Signer(_) = &apple.application
+        {
+            let mut o = crate::sign::disk_image::DiskImageSignOptions::new(ctx.app.identifier.clone(), apple.application.clone());
+            o.timestamp_url = apple.timestamp_url(&apple.application);
+            let image = std::fs::read(&path).at(&path)?;
+            std::fs::write(&path, crate::sign::disk_image::sign_disk_image(&image, &o)?).at(&path)?;
+            signed = true;
+        }
+        Ok(vec![Package::file(PackageKind::Dmg, macos_arch_label(ctx.app), path, signed)?])
     }
 }

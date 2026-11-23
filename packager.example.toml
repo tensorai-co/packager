@@ -37,9 +37,15 @@ install_location = "/Applications"
 # postinstall = "scripts/postinstall"
 
 [sign.apple]
-identity = "-"                     # ad hoc; certificate identities aren't supported yet
+# "-" is ad hoc. Otherwise a keychain identity ("Developer ID Application: …", a unique part of
+# its name, or its SHA-1), "p12:certs.p12" (password from PACKAGER_P12_PASSWORD) or
+# "pem:cert.pem,key.pem".
+identity = "-"
 hardened_runtime = true
 # entitlements = "app.entitlements"
+# timestamp = "auto"               # auto (Developer ID only, like codesign), apple, none, or a URL
+# requirements = 'designated => identifier "com.example.myapp" and anchor apple generic'
+
 
 [build]
 out_dir = "target/dist"
