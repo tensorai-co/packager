@@ -905,12 +905,14 @@ mod tests {
         assert!(lzma2_encode(&zeros, &Options::DEFAULT).len() < 1000);
         // Random data is stored in uncompressed chunks, with little overhead.
         let mut x = 7u32;
-        let rnd: Vec<u8> = (0..150_000).map(|_| {
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            x as u8
-        }).collect();
+        let rnd: Vec<u8> = (0..150_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
         let c = lzma2_encode(&rnd, &Options::DEFAULT);
         assert!(c.len() < rnd.len() + 20, "{}", c.len());
         assert_eq!(lzma2_decode(&c, usize::MAX).unwrap().0, rnd);

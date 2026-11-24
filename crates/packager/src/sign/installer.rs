@@ -16,7 +16,7 @@ use crate::crypto::x509::Certificate;
 use crate::format::base64;
 use crate::format::xar;
 use crate::format::xml::{Element, Node};
-use crate::sign::{cms, timestamp, Signer};
+use crate::sign::{Signer, cms, timestamp};
 use crate::transport::{Curl, Transport};
 use crate::{Error, Result};
 
@@ -56,11 +56,7 @@ fn key_info(chain: &[Certificate]) -> Element {
 }
 
 fn sig_element(name: &str, style: &str, offset: usize, size: usize, chain: &[Certificate]) -> Element {
-    Element::new(name)
-        .attr("style", style)
-        .child(Element::new("offset").text(offset.to_string()))
-        .child(Element::new("size").text(size.to_string()))
-        .child(key_info(chain))
+    Element::new(name).attr("style", style).child(Element::new("offset").text(offset.to_string())).child(Element::new("size").text(size.to_string())).child(key_info(chain))
 }
 
 /// Every `<data><offset>` under `el`, for rewriting.

@@ -122,14 +122,7 @@ impl Image {
             match cmd {
                 LC_SEGMENT_64 if size >= 72 => {
                     let name = String::from_utf8_lossy(&data[p + 8..p + 24]).trim_end_matches('\0').to_string();
-                    let seg = Segment {
-                        name,
-                        cmd_offset: p,
-                        vmaddr: le64(data, p + 24),
-                        vmsize: le64(data, p + 32),
-                        fileoff: le64(data, p + 40),
-                        filesize: le64(data, p + 48),
-                    };
+                    let seg = Segment { name, cmd_offset: p, vmaddr: le64(data, p + 24), vmsize: le64(data, p + 32), fileoff: le64(data, p + 40), filesize: le64(data, p + 48) };
                     let nsects = le32(data, p + 64) as usize;
                     for s in 0..nsects {
                         let sp = p + 72 + s * 80;

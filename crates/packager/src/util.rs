@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::IoContext;
 use crate::Result;
+use crate::error::IoContext;
 
 /// The timestamp every package uses: `SOURCE_DATE_EPOCH` when set, else 1980-01-01, so the same
 /// input gives byte-identical output.

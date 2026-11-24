@@ -9,15 +9,15 @@
 //! always ends with ZIP64 end records, which `AXCD` covers. Payload files are stored
 //! uncompressed for now (like `makeappx pack /nc`).
 
+use crate::crypto::crc::crc32;
 use crate::crypto::der::{self, tag};
 use crate::crypto::hmac::HashAlg;
-use crate::crypto::crc::crc32;
 use crate::crypto::sha256;
 use crate::format::base64;
-use crate::format::xml::{escape, Element};
+use crate::format::xml::{Element, escape};
 use crate::format::zip::{self, ZipWriter};
-use crate::sign::authenticode::{self, ms_oids, Options};
-use crate::sign::{cms, Signer};
+use crate::sign::authenticode::{self, Options, ms_oids};
+use crate::sign::{Signer, cms};
 use crate::{Error, Result};
 
 /// The block size of `AppxBlockMap.xml`.

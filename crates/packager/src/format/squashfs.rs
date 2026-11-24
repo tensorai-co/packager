@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::compress::lzma::Options as LzmaOptions;
 use crate::compress::xz::{self, Check};
-use crate::compress::{unzlib, zlib, Level};
+use crate::compress::{Level, unzlib, zlib};
 use crate::format::cpio::{Node, NodeKind};
 use crate::{Error, Result};
 

@@ -7,7 +7,7 @@
 use crate::crypto::crc::posix_cksum;
 use crate::format::cpio::{Node, NodeKind};
 use crate::format::macho;
-use crate::util::{be32, PutBe};
+use crate::util::{PutBe, be32};
 use crate::{Error, Result};
 
 const LEAF_CAPACITY: usize = 256;

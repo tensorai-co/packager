@@ -8,11 +8,11 @@ use std::sync::Arc;
 use packager::crypto::x509::Certificate;
 use packager::format::macho;
 use packager::format::plist::{Dict, Value};
-use packager::sign::apple::{sign_macho, verify_macho, CodeSignOptions, SliceSignature, CS_ADHOC, CS_RUNTIME};
-use packager::sign::bundle::{sign_bundle, verify_bundle, BundleSignOptions};
-use packager::sign::disk_image::{sign_disk_image, verify_disk_image, DiskImageSignOptions};
+use packager::sign::apple::{CS_ADHOC, CS_RUNTIME, CodeSignOptions, SliceSignature, sign_macho, verify_macho};
+use packager::sign::bundle::{BundleSignOptions, sign_bundle, verify_bundle};
+use packager::sign::disk_image::{DiskImageSignOptions, sign_disk_image, verify_disk_image};
 use packager::sign::requirement::{self, RequirementType};
-use packager::sign::{timestamp, AppleIdentity, KeySigner, Signer};
+use packager::sign::{AppleIdentity, KeySigner, Signer, timestamp};
 
 pub const CODESIGN_USAGE: &str = "\
 packager codesign — the codesign command line, implemented by packager
@@ -221,13 +221,8 @@ fn sign(o: &Opts, spec: &str) -> Result<(), String> {
     for p in &o.paths {
         let path = Path::new(p);
         let signed = if path.is_dir() {
-            let opts = BundleSignOptions {
-                identity: id.clone(),
-                hardened_runtime: o.runtime,
-                entitlements: entitlements.clone(),
-                requirements: requirements.clone(),
-                timestamp_url: timestamp_url.clone(),
-            };
+            let opts =
+                BundleSignOptions { identity: id.clone(), hardened_runtime: o.runtime, entitlements: entitlements.clone(), requirements: requirements.clone(), timestamp_url: timestamp_url.clone() };
             sign_bundle(path, &opts).map_err(|e| format!("{p}: {e}"))?
         } else if is_disk_image(path) {
             let data = std::fs::read(path).map_err(|e| format!("{p}: {e}"))?;
@@ -320,7 +315,11 @@ fn target(path: &Path) -> Result<(PathBuf, Option<Dict>), String> {
 fn context_check(path: &Path, sigs: &[SliceSignature], info: Option<&Dict>, req: &requirement::Expr) -> bool {
     let _ = path;
     sigs.iter().all(|s| {
-        let chain: Vec<Certificate> = s.cms.as_ref().map(|c| packager::sign::signer::order_chain(std::iter::once(c.signer.clone()).chain(c.certificates.iter().filter(|x| x.der != c.signer.der).cloned()).collect())).unwrap_or_default();
+        let chain: Vec<Certificate> = s
+            .cms
+            .as_ref()
+            .map(|c| packager::sign::signer::order_chain(std::iter::once(c.signer.clone()).chain(c.certificates.iter().filter(|x| x.der != c.signer.der).cloned()).collect()))
+            .unwrap_or_default();
         let ents = s.entitlements.as_ref().and_then(|e| Value::parse(e).ok()).and_then(|v| v.as_dict().cloned());
         let cdhashes = vec![s.cdhash.to_vec()];
         let ctx = requirement::Context { identifier: &s.identifier, chain: &chain, cdhashes: &cdhashes, info, entitlements: ents.as_ref(), trusted_anchors: &[] };
@@ -405,10 +404,10 @@ fn display(path: &Path, o: &Opts) -> Result<(), String> {
             println!("{text}");
         }
     }
-    if matches!(o.entitlements.as_deref(), Some("-") | Some(":-")) {
-        if let Some(e) = &s.entitlements {
-            print!("{}", String::from_utf8_lossy(e));
-        }
+    if matches!(o.entitlements.as_deref(), Some("-") | Some(":-"))
+        && let Some(e) = &s.entitlements
+    {
+        print!("{}", String::from_utf8_lossy(e));
     }
     Ok(())
 }

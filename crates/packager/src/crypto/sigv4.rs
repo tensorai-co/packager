@@ -2,7 +2,7 @@
 //! credentials Apple's Notary API hands out.
 
 use crate::crypto::hex;
-use crate::crypto::hmac::{hmac, HashAlg};
+use crate::crypto::hmac::{HashAlg, hmac};
 
 /// Temporary or long-lived AWS credentials.
 #[derive(Clone)]
@@ -89,18 +89,10 @@ mod tests {
     fn aws_s3_get_object_example() {
         // From the AWS S3 documentation, "Signature Calculations for the Authorization Header",
         // example GET Object.
-        let creds = Credentials {
-            access_key: "AKIAIOSFODNN7EXAMPLE".into(),
-            secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
-            session_token: None,
-        };
+        let creds = Credentials { access_key: "AKIAIOSFODNN7EXAMPLE".into(), secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(), session_token: None };
         let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let headers = [
-            ("host", "examplebucket.s3.amazonaws.com".to_string()),
-            ("range", "bytes=0-9".to_string()),
-            ("x-amz-content-sha256", empty.to_string()),
-            ("x-amz-date", "20130524T000000Z".to_string()),
-        ];
+        let headers =
+            [("host", "examplebucket.s3.amazonaws.com".to_string()), ("range", "bytes=0-9".to_string()), ("x-amz-content-sha256", empty.to_string()), ("x-amz-date", "20130524T000000Z".to_string())];
         let req = SignRequest { method: "GET", path: "/test.txt", query: &[], headers: &headers, payload_hash: empty, amz_date: "20130524T000000Z", region: "us-east-1", service: "s3" };
         let auth = authorization(&req, &creds);
         assert_eq!(

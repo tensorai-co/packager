@@ -128,7 +128,13 @@ impl Value {
             }
         }
         let n = count(self);
-        let ref_size = if n < 256 { 1 } else if n < 65536 { 2 } else { 4 };
+        let ref_size = if n < 256 {
+            1
+        } else if n < 65536 {
+            2
+        } else {
+            4
+        };
         fn put_ref(out: &mut Vec<u8>, r: usize, size: usize) {
             out.extend_from_slice(&(r as u32).to_be_bytes()[4 - size..]);
         }
@@ -227,7 +233,13 @@ impl Value {
             out.extend_from_slice(o);
         }
         let table = out.len();
-        let off_size = if table < 256 { 1 } else if table < 65536 { 2 } else { 4 };
+        let off_size = if table < 256 {
+            1
+        } else if table < 65536 {
+            2
+        } else {
+            4
+        };
         for o in offsets {
             out.extend_from_slice(&(o as u32).to_be_bytes()[4 - off_size..]);
         }
@@ -337,11 +349,7 @@ fn from_element(e: &xml::Element) -> Result<Value> {
         "integer" => {
             let t = e.text_content();
             let t = t.trim();
-            let v = if let Some(h) = t.strip_prefix("0x") {
-                i64::from_str_radix(h, 16).ok()
-            } else {
-                t.parse::<i64>().ok().or_else(|| t.parse::<u64>().ok().map(|u| u as i64))
-            };
+            let v = if let Some(h) = t.strip_prefix("0x") { i64::from_str_radix(h, 16).ok() } else { t.parse::<i64>().ok().or_else(|| t.parse::<u64>().ok().map(|u| u as i64)) };
             Value::Integer(v.ok_or_else(|| bad(format!("bad integer `{t}`")))?)
         }
         "real" => Value::Real(e.text_content().trim().parse().map_err(|_| bad("bad real".into()))?),

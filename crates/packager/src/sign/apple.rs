@@ -11,7 +11,7 @@ use crate::crypto::sha256;
 use crate::format::macho::{self, Image, MH_EXECUTE};
 use crate::format::plist::Value;
 use crate::sign::requirement::{self, RequirementType};
-use crate::sign::{cms, timestamp, AppleIdentity, Signer};
+use crate::sign::{AppleIdentity, Signer, cms, timestamp};
 use crate::transport::{Curl, Transport};
 use crate::util::PutBe;
 use crate::{Error, Result};
@@ -122,10 +122,7 @@ pub fn sign_macho(input: &[u8], opts: &CodeSignOptions) -> Result<Signed> {
     let requirements = requirements_for(opts)?;
     let designated = match &opts.identity {
         AppleIdentity::AdHoc => None,
-        AppleIdentity::Signer(_) => requirement::parse_requirement_set(&requirements)?
-            .into_iter()
-            .find(|(t, _)| *t == RequirementType::Designated)
-            .map(|(_, e)| e.to_string()),
+        AppleIdentity::Signer(_) => requirement::parse_requirement_set(&requirements)?.into_iter().find(|(t, _)| *t == RequirementType::Designated).map(|(_, e)| e.to_string()),
     };
     let mut slices = macho::slices(input)?;
     let mut cdhashes = Vec::with_capacity(slices.len());
@@ -414,9 +411,7 @@ pub fn verify_macho(data: &[u8]) -> Result<Vec<SliceSignature>> {
         let arch = img.arch_name();
         let (_, off, size) = img.code_signature.ok_or_else(|| bad(format!("{arch}: not signed")))?;
         let sb = s.data.get(off as usize..(off + size) as usize).ok_or_else(|| bad(format!("{arch}: signature out of range")))?;
-        let be = |b: &[u8], p: usize| -> Result<u32> {
-            b.get(p..p + 4).map(|x| u32::from_be_bytes([x[0], x[1], x[2], x[3]])).ok_or_else(|| bad(format!("{arch}: truncated blob")))
-        };
+        let be = |b: &[u8], p: usize| -> Result<u32> { b.get(p..p + 4).map(|x| u32::from_be_bytes([x[0], x[1], x[2], x[3]])).ok_or_else(|| bad(format!("{arch}: truncated blob"))) };
         if be(sb, 0)? != CSMAGIC_EMBEDDED_SIGNATURE {
             return Err(bad(format!("{arch}: not an embedded signature")));
         }

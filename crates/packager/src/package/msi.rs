@@ -11,10 +11,10 @@ use crate::app::{App, Arch};
 use crate::crypto::{hex, sha256};
 use crate::error::IoContext;
 use crate::format::cab::{self, CabFile};
-use crate::format::msi::{col, Database, Summary, Table, Value};
+use crate::format::msi::{Database, Summary, Table, Value, col};
 use crate::identity::{guid, msi_product_code, msi_upgrade_code, msi_version};
 use crate::package::windows::{arch_label, exe_name, prepare_exe, resource_files, windows_archs};
-use crate::package::{file_name, Context, Package, PackageBuilder, PackageKind};
+use crate::package::{Context, Package, PackageBuilder, PackageKind, file_name};
 use crate::util::source_date_epoch;
 use crate::{Error, Result};
 
@@ -106,7 +106,14 @@ fn rule(table: &str, column: &str) -> Rule {
     const MAX: i32 = i32::MAX;
     let fk = |t: &'static str| -> Rule { ("Identifier", None, None, Some(t), Some(1), None) };
     match (table, column) {
-        (_, "Property") | ("Directory", "Directory") | ("Component", "Component") | ("File", "File") | ("Feature", "Feature") | ("Shortcut", "Shortcut") | ("Registry", "Registry") | ("Icon", "Name") => ("Identifier", None, None, None, None, None),
+        (_, "Property")
+        | ("Directory", "Directory")
+        | ("Component", "Component")
+        | ("File", "File")
+        | ("Feature", "Feature")
+        | ("Shortcut", "Shortcut")
+        | ("Registry", "Registry")
+        | ("Icon", "Name") => ("Identifier", None, None, None, None, None),
         (_, "Action") => ("Identifier", None, None, None, None, None),
         ("Property", "Value") => ("Text", None, None, None, None, None),
         ("Directory", "Directory_Parent") => fk("Directory"),
@@ -159,7 +166,9 @@ fn rule(table: &str, column: &str) -> Rule {
         ("ControlEvent", "Argument") => ("Formatted", None, None, None, None, None),
         ("TextStyle", "FaceName") | ("Control", "Help") => ("Text", None, None, None, None, None),
         ("Dialog", "HCentering") | ("Dialog", "VCentering") => ("", Some(0), Some(100), None, None, None),
-        ("Dialog", "Width") | ("Dialog", "Height") | ("Control", "X") | ("Control", "Y") | ("Control", "Width") | ("Control", "Height") | ("TextStyle", "Size") => ("", Some(0), Some(32767), None, None, None),
+        ("Dialog", "Width") | ("Dialog", "Height") | ("Control", "X") | ("Control", "Y") | ("Control", "Width") | ("Control", "Height") | ("TextStyle", "Size") => {
+            ("", Some(0), Some(32767), None, None, None)
+        }
         ("Dialog", "Attributes") | ("Control", "Attributes") => ("", Some(0), Some(i32::MAX), None, None, None),
         ("TextStyle", "Color") => ("", Some(0), Some(16_777_215), None, None, None),
         ("TextStyle", "StyleBits") => ("", Some(0), Some(15), None, None, None),
@@ -173,7 +182,18 @@ fn validation(tables: &[Table]) -> Table {
     use crate::format::msi::Kind;
     let mut v = Table::new(
         "_Validation",
-        vec![col("Table", "*s32"), col("Column", "*s32"), col("Nullable", "s4"), col("MinValue", "i4?"), col("MaxValue", "i4?"), col("KeyTable", "s255?"), col("KeyColumn", "i2?"), col("Category", "s32?"), col("Set", "l255?"), col("Description", "l255?")],
+        vec![
+            col("Table", "*s32"),
+            col("Column", "*s32"),
+            col("Nullable", "s4"),
+            col("MinValue", "i4?"),
+            col("MaxValue", "i4?"),
+            col("KeyTable", "s255?"),
+            col("KeyColumn", "i2?"),
+            col("Category", "s32?"),
+            col("Set", "l255?"),
+            col("Description", "l255?"),
+        ],
     );
     for t in tables {
         for c in &t.columns {
@@ -281,8 +301,21 @@ impl Msi {
         let mut dirs: BTreeMap<String, String> = BTreeMap::new(); // path -> key
         let mut used_names: BTreeMap<String, HashSet<String>> = BTreeMap::new(); // dir key -> short names
         let x64 = matches!(arch, Arch::WindowsX64 | Arch::WindowsArm64);
-        let mut component = Table::new("Component", vec![col("Component", "*s72"), col("ComponentId", "s38?"), col("Directory_", "s72"), col("Attributes", "i2"), col("Condition", "s255?"), col("KeyPath", "s72?")]);
-        let mut file = Table::new("File", vec![col("File", "*s72"), col("Component_", "s72"), col("FileName", "l255"), col("FileSize", "i4"), col("Version", "s72?"), col("Language", "s20?"), col("Attributes", "i2?"), col("Sequence", "i4")]);
+        let mut component =
+            Table::new("Component", vec![col("Component", "*s72"), col("ComponentId", "s38?"), col("Directory_", "s72"), col("Attributes", "i2"), col("Condition", "s255?"), col("KeyPath", "s72?")]);
+        let mut file = Table::new(
+            "File",
+            vec![
+                col("File", "*s72"),
+                col("Component_", "s72"),
+                col("FileName", "l255"),
+                col("FileSize", "i4"),
+                col("Version", "s72?"),
+                col("Language", "s20?"),
+                col("Attributes", "i2?"),
+                col("Sequence", "i4"),
+            ],
+        );
         let mut fc = Table::new("FeatureComponents", vec![col("Feature_", "*s38"), col("Component_", "*s72")]);
         let mut cab_files = Vec::new();
         let (exe_key, exe_comp) = ("F_main".to_string(), "C_main".to_string());
@@ -355,14 +388,38 @@ impl Msi {
             property.row(vec![k.into(), v.into()]);
         }
 
-        let mut feature = Table::new("Feature", vec![col("Feature", "*s38"), col("Feature_Parent", "s38?"), col("Title", "l64?"), col("Description", "l255?"), col("Display", "i2?"), col("Level", "i2"), col("Directory_", "s72?"), col("Attributes", "i2")]);
+        let mut feature = Table::new(
+            "Feature",
+            vec![
+                col("Feature", "*s38"),
+                col("Feature_Parent", "s38?"),
+                col("Title", "l64?"),
+                col("Description", "l255?"),
+                col("Display", "i2?"),
+                col("Level", "i2"),
+                col("Directory_", "s72?"),
+                col("Attributes", "i2"),
+            ],
+        );
         feature.row(vec!["Main".into(), Value::Null, app.name.clone().into(), Value::Null, 0.into(), 1.into(), "INSTALLDIR".into(), 0.into()]);
-        let mut media = Table::new("Media", vec![col("DiskId", "*i2"), col("LastSequence", "i4"), col("DiskPrompt", "l64?"), col("Cabinet", "s255?"), col("VolumeLabel", "s32?"), col("Source", "s72?")]);
+        let mut media =
+            Table::new("Media", vec![col("DiskId", "*i2"), col("LastSequence", "i4"), col("DiskPrompt", "l64?"), col("Cabinet", "s255?"), col("VolumeLabel", "s32?"), col("Source", "s72?")]);
         for (k, (last, _)) in cabinets.iter().enumerate() {
             media.row(vec![(k as i32 + 1).into(), (*last).into(), Value::Null, format!("#{}", cab_name(k)).into(), Value::Null, Value::Null]);
         }
 
-        let mut upgrade_t = Table::new("Upgrade", vec![col("UpgradeCode", "*s38"), col("VersionMin", "*s20?"), col("VersionMax", "*s20?"), col("Language", "*s255?"), col("Attributes", "*i4"), col("Remove", "s255?"), col("ActionProperty", "s72")]);
+        let mut upgrade_t = Table::new(
+            "Upgrade",
+            vec![
+                col("UpgradeCode", "*s38"),
+                col("VersionMin", "*s20?"),
+                col("VersionMax", "*s20?"),
+                col("Language", "*s255?"),
+                col("Attributes", "*i4"),
+                col("Remove", "s255?"),
+                col("ActionProperty", "s72"),
+            ],
+        );
         // Older versions are removed (migrating feature states); newer ones are detected to block
         // a downgrade.
         upgrade_t.row(vec![upgrade.clone().into(), Value::Null, version.clone().into(), Value::Null, 1.into(), Value::Null, "OLDERVERSIONBEINGUPGRADED".into()]);
@@ -400,7 +457,16 @@ impl Msi {
             exec.row(vec![a.into(), Value::Null, n.into()]);
         }
         let mut ui_seq = Table::new("InstallUISequence", seq_cols());
-        for (a, n) in [("FindRelatedProducts", 25), ("LaunchConditions", 100), ("ValidateProductID", 700), ("CostInitialize", 800), ("FileCost", 900), ("CostFinalize", 1000), ("MigrateFeatureStates", 1200), ("ExecuteAction", 1300)] {
+        for (a, n) in [
+            ("FindRelatedProducts", 25),
+            ("LaunchConditions", 100),
+            ("ValidateProductID", 700),
+            ("CostInitialize", 800),
+            ("FileCost", 900),
+            ("CostFinalize", 1000),
+            ("MigrateFeatureStates", 1200),
+            ("ExecuteAction", 1300),
+        ] {
             ui_seq.row(vec![a.into(), Value::Null, n.into()]);
         }
         if let Some(ui) = &ui {
@@ -420,12 +486,48 @@ impl Msi {
             // (ICE43/ICE57: non-advertised shortcuts need an HKCU key path).
             let sc_comp = "C_shortcut".to_string();
             let sc_key = "R_shortcut".to_string();
-            component.row(vec![sc_comp.clone().into(), guid(&format!("msi-component:{upgrade}:{}:shortcut", arch.name())).into(), "INSTALLDIR".into(), (if x64 { 256 | 4 } else { 4 }).into(), Value::Null, sc_key.clone().into()]);
+            component.row(vec![
+                sc_comp.clone().into(),
+                guid(&format!("msi-component:{upgrade}:{}:shortcut", arch.name())).into(),
+                "INSTALLDIR".into(),
+                (if x64 { 256 | 4 } else { 4 }).into(),
+                Value::Null,
+                sc_key.clone().into(),
+            ]);
             fc.row(vec!["Main".into(), sc_comp.clone().into()]);
             reg.row(vec![sc_key.into(), 1.into(), format!("Software\\{}\\{}", manufacturer_dir, app.name).into(), "Shortcut".into(), "#1".into(), sc_comp.clone().into()]);
-            let mut sc = Table::new("Shortcut", vec![col("Shortcut", "*s72"), col("Directory_", "s72"), col("Name", "l128"), col("Component_", "s72"), col("Target", "s72"), col("Arguments", "s255?"), col("Description", "l255?"), col("Hotkey", "i2?"), col("Icon_", "s72?"), col("IconIndex", "i2?"), col("ShowCmd", "i2?"), col("WkDir", "s72?")]);
+            let mut sc = Table::new(
+                "Shortcut",
+                vec![
+                    col("Shortcut", "*s72"),
+                    col("Directory_", "s72"),
+                    col("Name", "l128"),
+                    col("Component_", "s72"),
+                    col("Target", "s72"),
+                    col("Arguments", "s255?"),
+                    col("Description", "l255?"),
+                    col("Hotkey", "i2?"),
+                    col("Icon_", "s72?"),
+                    col("IconIndex", "i2?"),
+                    col("ShowCmd", "i2?"),
+                    col("WkDir", "s72?"),
+                ],
+            );
             let mut used = HashSet::new();
-            sc.row(vec!["S_main".into(), "ProgramMenuFolder".into(), short_long(&file_name(&app.name), &mut used).into(), sc_comp.into(), format!("[INSTALLDIR]{exe_file}").into(), Value::Null, app.description.clone().into(), Value::Null, Value::Null, Value::Null, Value::Null, "INSTALLDIR".into()]);
+            sc.row(vec![
+                "S_main".into(),
+                "ProgramMenuFolder".into(),
+                short_long(&file_name(&app.name), &mut used).into(),
+                sc_comp.into(),
+                format!("[INSTALLDIR]{exe_file}").into(),
+                Value::Null,
+                app.description.clone().into(),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                "INSTALLDIR".into(),
+            ]);
             tables.push(sc);
         }
         let open = format!("\"[#{exe_key}]\" \"%1\"");

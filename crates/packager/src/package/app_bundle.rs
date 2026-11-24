@@ -8,9 +8,9 @@ use crate::error::IoContext;
 use crate::format::macho;
 use crate::format::plist::{Dict, Value};
 use crate::identity::macos_versions;
-use crate::package::{file_name, Context, Package, PackageBuilder, PackageKind};
-use crate::sign::bundle::{sign_bundle, BundleSignOptions};
+use crate::package::{Context, Package, PackageBuilder, PackageKind, file_name};
 use crate::sign::Apple;
+use crate::sign::bundle::{BundleSignOptions, sign_bundle};
 use crate::util::{copy_file, copy_tree};
 use crate::{Error, Result};
 
@@ -103,10 +103,7 @@ impl AppBundle {
         d.insert("CFBundleVersion", build);
         if !app.url_schemes.is_empty() {
             let schemes: Vec<Value> = app.url_schemes.iter().map(Value::from).collect();
-            d.insert(
-                "CFBundleURLTypes",
-                vec![Value::Dict(Dict::new().with("CFBundleURLName", &app.identifier).with("CFBundleURLSchemes", schemes))],
-            );
+            d.insert("CFBundleURLTypes", vec![Value::Dict(Dict::new().with("CFBundleURLName", &app.identifier).with("CFBundleURLSchemes", schemes))]);
         }
         if !app.file_types.is_empty() {
             let types: Vec<Value> = app
@@ -184,11 +181,7 @@ impl AppBundle {
 
         let icon_file = match &app.icon {
             Some(src) => {
-                let icns = if src.extension().is_some_and(|e| e.eq_ignore_ascii_case("icns")) {
-                    std::fs::read(src).at(src)?
-                } else {
-                    crate::image::icns_from_png(src)?
-                };
+                let icns = if src.extension().is_some_and(|e| e.eq_ignore_ascii_case("icns")) { std::fs::read(src).at(src)? } else { crate::image::icns_from_png(src)? };
                 let p = res.join("AppIcon.icns");
                 std::fs::write(&p, icns).at(&p)?;
                 Some("AppIcon")

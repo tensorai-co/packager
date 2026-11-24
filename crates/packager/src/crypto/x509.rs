@@ -1,11 +1,10 @@
 //! X.509 certificates: parsing what code signing needs (names, keys, extensions, Apple's
 //! marker OIDs), checking issuer signatures, and creating self-signed code-signing certificates.
 
-use crate::crypto::der::{self, oids, tag, Tlv};
-use crate::crypto::hmac::HashAlg;
-use crate::crypto::keys::{hash_for_signature_oid, pem_decode, PrivateKey, PublicKey};
 use crate::Result;
-
+use crate::crypto::der::{self, Tlv, oids, tag};
+use crate::crypto::hmac::HashAlg;
+use crate::crypto::keys::{PrivateKey, PublicKey, hash_for_signature_oid, pem_decode};
 
 /// A certificate extension.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,4 +247,3 @@ mod tests {
         assert_eq!(c.public_key, key.public());
     }
 }
-

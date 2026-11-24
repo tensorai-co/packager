@@ -11,7 +11,7 @@ use crate::format::appx;
 use crate::format::xml::Element;
 use crate::identity::msix_version;
 use crate::package::windows::{arch_label, exe_name, prepare_exe, resource_files, windows_archs};
-use crate::package::{file_name, Context, Package, PackageBuilder, PackageKind};
+use crate::package::{Context, Package, PackageBuilder, PackageKind, file_name};
 use crate::util::source_date_epoch;
 use crate::{Error, Result};
 
@@ -132,7 +132,10 @@ impl Msix {
                     .child(Element::new("PublisherDisplayName").text(publisher_display))
                     .child(Element::new("Logo").text("Assets\\StoreLogo.png")),
             )
-            .child(Element::new("Dependencies").child(Element::new("TargetDeviceFamily").attr("Name", "Windows.Desktop").attr("MinVersion", self.min_version.clone()).attr("MaxVersionTested", self.max_version_tested.clone())))
+            .child(
+                Element::new("Dependencies")
+                    .child(Element::new("TargetDeviceFamily").attr("Name", "Windows.Desktop").attr("MinVersion", self.min_version.clone()).attr("MaxVersionTested", self.max_version_tested.clone())),
+            )
             .child(Element::new("Resources").child(Element::new("Resource").attr("Language", "en-us")))
             .child(Element::new("Applications").child(application))
             .child(Element::new("Capabilities").child(Element::new("rescap:Capability").attr("Name", "runFullTrust")));

@@ -12,7 +12,7 @@ use crate::format::ds_store::{self, Background, Layout};
 use crate::format::hfsplus::{self, VolumeOptions};
 use crate::format::udif::{self, PartitionType};
 use crate::package::app_bundle::macos_arch_label;
-use crate::package::{file_name, Context, Package, PackageBuilder, PackageKind};
+use crate::package::{Context, Package, PackageBuilder, PackageKind, file_name};
 use crate::util::source_date_epoch;
 use crate::{Error, Result};
 
@@ -39,16 +39,7 @@ impl Default for Dmg {
 impl Dmg {
     /// A 540×380 window with 128 px icons: the app on the left, Applications on the right.
     pub fn new() -> Self {
-        Dmg {
-            volume_name: None,
-            background: None,
-            window_size: (540, 380),
-            icon_size: 128,
-            app_position: (140, 180),
-            applications_position: (400, 180),
-            volume_icon: true,
-            layout: true,
-        }
+        Dmg { volume_name: None, background: None, window_size: (540, 380), icon_size: 128, app_position: (140, 180), applications_position: (400, 180), volume_icon: true, layout: true }
     }
     /// The volume name (defaults to the app name).
     pub fn volume_name(mut self, n: impl Into<String>) -> Self {
@@ -137,17 +128,12 @@ impl Dmg {
             nodes.push(node("./.DS_Store", NodeKind::File(Vec::new()), 0o644));
             opts.invisible.push("./.DS_Store".into());
             let background = background_name.map(|file| Background {
-                    volume_name: vol.clone(),
-                    volume_created: hfsplus::hfs_time(mtime),
-                    folder: (".background".into(), hfsplus::catalog_id(&nodes, "./.background").unwrap_or(0)),
-                    file: (file.clone(), hfsplus::catalog_id(&nodes, &format!("./.background/{file}")).unwrap_or(0)),
-                });
-            let layout = Layout {
-                window,
-                icon_size: self.icon_size,
-                positions: vec![(bundle.clone(), self.app_position), ("Applications".into(), self.applications_position)],
-                background,
-            };
+                volume_name: vol.clone(),
+                volume_created: hfsplus::hfs_time(mtime),
+                folder: (".background".into(), hfsplus::catalog_id(&nodes, "./.background").unwrap_or(0)),
+                file: (file.clone(), hfsplus::catalog_id(&nodes, &format!("./.background/{file}")).unwrap_or(0)),
+            });
+            let layout = Layout { window, icon_size: self.icon_size, positions: vec![(bundle.clone(), self.app_position), ("Applications".into(), self.applications_position)], background };
             let store = ds_store::write(&layout)?;
             if let Some(n) = nodes.iter_mut().find(|n| n.path == "./.DS_Store") {
                 n.kind = NodeKind::File(store);

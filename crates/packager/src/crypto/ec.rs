@@ -2,7 +2,7 @@
 
 use crate::crypto::bigint::BigUint;
 use crate::crypto::der;
-use crate::crypto::hmac::{hmac, HashAlg};
+use crate::crypto::hmac::{HashAlg, hmac};
 use crate::{Error, Result};
 
 /// A supported curve.

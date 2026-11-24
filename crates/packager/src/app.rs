@@ -47,17 +47,7 @@ impl Arch {
     }
     /// Parses [`Arch::name`].
     pub fn parse(s: &str) -> Option<Arch> {
-        [
-            Arch::MacosArm64,
-            Arch::MacosX64,
-            Arch::MacosUniversal,
-            Arch::WindowsX64,
-            Arch::WindowsArm64,
-            Arch::LinuxX64,
-            Arch::LinuxArm64,
-        ]
-        .into_iter()
-        .find(|a| a.name() == s)
+        [Arch::MacosArm64, Arch::MacosX64, Arch::MacosUniversal, Arch::WindowsX64, Arch::WindowsArm64, Arch::LinuxX64, Arch::LinuxArm64].into_iter().find(|a| a.name() == s)
     }
 }
 
@@ -266,13 +256,7 @@ impl App {
 
     /// The executable name: explicit, else the first binary's file stem, else the name.
     pub fn executable_name(&self) -> String {
-        self.executable.clone().unwrap_or_else(|| {
-            self.binaries
-                .first()
-                .and_then(|(_, p)| p.file_stem())
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.name.clone())
-        })
+        self.executable.clone().unwrap_or_else(|| self.binaries.first().and_then(|(_, p)| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| self.name.clone()))
     }
 
     /// The binaries for macOS.
@@ -293,9 +277,8 @@ impl App {
         if self.name.contains('/') || self.name.contains(':') {
             return Err(Error::invalid("app", "name", "can't contain `/` or `:` (it names files and bundles)"));
         }
-        let id_ok = !self.identifier.is_empty()
-            && self.identifier.split('.').count() >= 2
-            && self.identifier.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+        let id_ok =
+            !self.identifier.is_empty() && self.identifier.split('.').count() >= 2 && self.identifier.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
         if !id_ok {
             return Err(Error::invalid("app", "identifier", format!("`{}` must be reverse-DNS like `com.example.myapp` (letters, digits, `-`)", self.identifier)));
         }
@@ -309,8 +292,7 @@ impl App {
             }
         }
         for s in &self.url_schemes {
-            let ok = s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-                && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
+            let ok = s.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));
             if !ok {
                 return Err(Error::invalid("app", "url_scheme", format!("`{s}` isn't a valid URL scheme")));
             }

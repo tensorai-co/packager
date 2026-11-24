@@ -4,9 +4,9 @@
 
 use crate::crypto::hmac::HashAlg;
 use crate::crypto::sha256;
-use crate::sign::apple::{SliceSignature, CS_ADHOC};
+use crate::sign::apple::{CS_ADHOC, SliceSignature};
 use crate::sign::requirement::{self, RequirementType};
-use crate::sign::{cms, timestamp, AppleIdentity};
+use crate::sign::{AppleIdentity, cms, timestamp};
 use crate::transport::{Curl, Transport};
 use crate::util::PutBe;
 use crate::{Error, Result};

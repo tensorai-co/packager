@@ -60,7 +60,7 @@ pub fn hfs_name(s: &str) -> Vec<u16> {
             let s_index = cp - 0xAC00;
             out.push((0x1100 + s_index / 588) as u16);
             out.push((0x1161 + (s_index % 588) / 28) as u16);
-            if s_index % 28 != 0 {
+            if !s_index.is_multiple_of(28) {
                 out.push((0x11A7 + s_index % 28) as u16);
             }
             continue;

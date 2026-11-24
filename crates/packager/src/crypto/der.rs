@@ -267,9 +267,7 @@ impl<'a> Tlv<'a> {
     /// The value of a string type as text.
     pub fn as_string(&self) -> Result<String> {
         match self.tag {
-            tag::UTF8_STRING | tag::PRINTABLE_STRING | tag::IA5_STRING | 0x14 | 0x1a | tag::UTC_TIME | tag::GENERALIZED_TIME => {
-                Ok(String::from_utf8_lossy(self.value).into_owned())
-            }
+            tag::UTF8_STRING | tag::PRINTABLE_STRING | tag::IA5_STRING | 0x14 | 0x1a | tag::UTC_TIME | tag::GENERALIZED_TIME => Ok(String::from_utf8_lossy(self.value).into_owned()),
             tag::BMP_STRING => {
                 let u: Vec<u16> = self.value.chunks(2).filter(|c| c.len() == 2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
                 Ok(String::from_utf16_lossy(&u))

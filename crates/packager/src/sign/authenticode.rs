@@ -10,7 +10,7 @@ use crate::crypto::der::{self, oids, tag};
 use crate::crypto::hmac::HashAlg;
 use crate::crypto::keys::{digest_oid, hash_for_digest_oid};
 use crate::format::pe::{self, Image};
-use crate::sign::{cms, timestamp, Signer};
+use crate::sign::{Signer, cms, timestamp};
 use crate::transport::{Curl, Transport};
 use crate::{Error, Result};
 

@@ -99,7 +99,9 @@ fn base_name(app: &App) -> String {
 /// Checks a Debian package name: lowercase letters, digits, `+`, `-` and `.`, at least two
 /// characters, starting with a letter or digit.
 pub fn check_deb_name(name: &str) -> Result<()> {
-    let ok = name.len() >= 2 && name.bytes().next().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-.".contains(&b));
+    let ok = name.len() >= 2
+        && name.bytes().next().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-.".contains(&b));
     if ok { Ok(()) } else { Err(Error::invalid("deb", "name", format!("`{name}` must be 2+ lowercase letters, digits, `+`, `-` or `.`, starting with a letter or digit"))) }
 }
 

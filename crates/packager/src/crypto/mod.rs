@@ -33,7 +33,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// Decodes hex (either case).
 pub fn unhex(s: &str) -> crate::Result<Vec<u8>> {
     let s = s.trim();
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(crate::Error::Other(format!("odd-length hex `{s}`")));
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| crate::Error::Other(format!("bad hex `{s}`")))).collect()
@@ -72,9 +72,7 @@ pub fn random_bytes(n: usize) -> crate::Result<Vec<u8>> {
     #[cfg(not(windows))]
     {
         use std::io::Read;
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut buf))
-            .map_err(|e| crate::Error::Other(format!("no OS randomness (/dev/urandom): {e}")))?;
+        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).map_err(|e| crate::Error::Other(format!("no OS randomness (/dev/urandom): {e}")))?;
     }
     Ok(buf)
 }

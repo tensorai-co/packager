@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use crate::app::App;
-use crate::compress::{gzip, Level};
+use crate::compress::{Level, gzip};
 use crate::error::IoContext;
 use crate::format::cpio::{self, Node, NodeKind};
 use crate::format::xar::{self, XarEntry};
@@ -12,7 +12,7 @@ use crate::format::xml::Element;
 use crate::format::{bom, plist};
 use crate::identity::macos_versions;
 use crate::package::app_bundle::macos_arch_label;
-use crate::package::{file_name, Context, Package, PackageBuilder, PackageKind};
+use crate::package::{Context, Package, PackageBuilder, PackageKind, file_name};
 use crate::util::source_date_epoch;
 use crate::{Error, Result};
 
@@ -131,19 +131,20 @@ impl Pkg {
         };
         let title = self.title.clone().unwrap_or_else(|| app.name.clone());
         let pkg_ref = || Element::new("pkg-ref").attr("id", id.as_str());
-        let dist = Element::new("installer-gui-script")
-            .attr("minSpecVersion", "2")
-            .child(Element::new("title").text(title))
-            .child(pkg_ref().child(Element::new("bundle-version").child(
-                Element::new("bundle").attr("CFBundleShortVersionString", short.as_str()).attr("CFBundleVersion", build.as_str()).attr("id", id.as_str()).attr("path", bundle_name.as_str()),
-            )))
-            .child(Element::new("options").attr("customize", "never").attr("require-scripts", "false").attr("hostArchitectures", host_archs))
-            .child(Element::new("domains").attr("enable_anywhere", "false").attr("enable_currentUserHome", "false").attr("enable_localSystem", "true"))
-            .child(Element::new("volume-check").child(Element::new("allowed-os-versions").child(Element::new("os-version").attr("min", min_macos))))
-            .child(Element::new("choices-outline").child(Element::new("line").attr("choice", "default").child(Element::new("line").attr("choice", id.as_str()))))
-            .child(Element::new("choice").attr("id", "default"))
-            .child(Element::new("choice").attr("id", id.as_str()).attr("visible", "false").child(pkg_ref()))
-            .child(pkg_ref().attr("version", short.as_str()).attr("onConclusion", "none").attr("installKBytes", install_kb.to_string()).text(format!("#{component}")));
+        let dist =
+            Element::new("installer-gui-script")
+                .attr("minSpecVersion", "2")
+                .child(Element::new("title").text(title))
+                .child(pkg_ref().child(Element::new("bundle-version").child(
+                    Element::new("bundle").attr("CFBundleShortVersionString", short.as_str()).attr("CFBundleVersion", build.as_str()).attr("id", id.as_str()).attr("path", bundle_name.as_str()),
+                )))
+                .child(Element::new("options").attr("customize", "never").attr("require-scripts", "false").attr("hostArchitectures", host_archs))
+                .child(Element::new("domains").attr("enable_anywhere", "false").attr("enable_currentUserHome", "false").attr("enable_localSystem", "true"))
+                .child(Element::new("volume-check").child(Element::new("allowed-os-versions").child(Element::new("os-version").attr("min", min_macos))))
+                .child(Element::new("choices-outline").child(Element::new("line").attr("choice", "default").child(Element::new("line").attr("choice", id.as_str()))))
+                .child(Element::new("choice").attr("id", "default"))
+                .child(Element::new("choice").attr("id", id.as_str()).attr("visible", "false").child(pkg_ref()))
+                .child(pkg_ref().attr("version", short.as_str()).attr("onConclusion", "none").attr("installKBytes", install_kb.to_string()).text(format!("#{component}")));
         let distribution = dist.to_document(4).replacen("encoding=\"UTF-8\"", "encoding=\"utf-8\"", 1);
 
         let archive = xar::write(&[XarEntry::file("Distribution", distribution.into_bytes()), XarEntry::dir(component, component_files)], mtime)?;

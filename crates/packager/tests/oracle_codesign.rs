@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use packager::sign::apple::{sign_macho, verify_macho, CodeSignOptions};
+use packager::sign::apple::{CodeSignOptions, sign_macho, verify_macho};
 use packager::sign::{AppleIdentity, KeySigner};
 
 fn scratch(name: &str) -> PathBuf {
@@ -109,7 +109,7 @@ fn legacy_deployment_targets_get_sha1_and_sha256() {
 
 #[test]
 fn disk_images_sign_and_verify() {
-    use packager::sign::disk_image::{sign_disk_image, verify_disk_image, DiskImageSignOptions};
+    use packager::sign::disk_image::{DiskImageSignOptions, sign_disk_image, verify_disk_image};
     let dir = scratch("dmg");
     let Some(bin) = compile(&dir, &["arm64"]) else { return };
     let app = packager::App::new("Dmg Sig", "com.example.dmgsig", "1.0.0").binary(packager::Arch::MacosArm64, &bin);

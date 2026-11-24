@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use packager::sign::disk_image::{sign_disk_image, verify_disk_image, DiskImageSignOptions};
-use packager::sign::installer::{sign_pkg, verify_pkg, InstallerSignOptions};
+use packager::sign::disk_image::{DiskImageSignOptions, sign_disk_image, verify_disk_image};
+use packager::sign::installer::{InstallerSignOptions, sign_pkg, verify_pkg};
 use packager::sign::{AppleIdentity, KeySigner};
 use packager::staple;
 

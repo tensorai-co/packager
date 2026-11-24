@@ -159,7 +159,7 @@ pub enum Expr {
 fn put_data(out: &mut Vec<u8>, b: &[u8]) {
     out.u32(b.len() as u32);
     out.extend_from_slice(b);
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }
@@ -463,7 +463,32 @@ fn is_bare(s: &str) -> bool {
     !s.is_empty()
         && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-        && !matches!(s, "and" | "or" | "exists" | "absent" | "always" | "never" | "true" | "false" | "anchor" | "certificate" | "cert" | "identifier" | "info" | "entitlement" | "cdhash" | "platform" | "notarized" | "legacy" | "leaf" | "root" | "trusted" | "apple" | "generic")
+        && !matches!(
+            s,
+            "and"
+                | "or"
+                | "exists"
+                | "absent"
+                | "always"
+                | "never"
+                | "true"
+                | "false"
+                | "anchor"
+                | "certificate"
+                | "cert"
+                | "identifier"
+                | "info"
+                | "entitlement"
+                | "cdhash"
+                | "platform"
+                | "notarized"
+                | "legacy"
+                | "leaf"
+                | "root"
+                | "trusted"
+                | "apple"
+                | "generic"
+        )
 }
 
 fn quote(s: &str) -> String {
@@ -613,7 +638,7 @@ fn lex(src: &str) -> Result<Vec<Tok>> {
                 i += 1;
             }
             i += 1;
-            if h.len() % 2 != 0 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+            if !h.len().is_multiple_of(2) || !h.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(err(format!("bad hex literal H\"{h}\"")));
             }
             out.push(Tok::Hex((0..h.len()).step_by(2).map(|k| u8::from_str_radix(&h[k..k + 2], 16).unwrap_or(0)).collect()));

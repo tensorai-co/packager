@@ -5,10 +5,10 @@
 
 use crate::crypto::der::{self, tag};
 use crate::crypto::hmac::HashAlg;
-use crate::format::cfb::{self, ReadEntry, Stream};
 use crate::format::appx::SPC_SIPINFO;
-use crate::sign::authenticode::{self, ms_oids, Options};
-use crate::sign::{cms, Signer};
+use crate::format::cfb::{self, ReadEntry, Stream};
+use crate::sign::authenticode::{self, Options, ms_oids};
+use crate::sign::{Signer, cms};
 use crate::{Error, Result};
 
 /// The MSI SIP's GUID {000C10F1-0000-0000-C000-000000000046}.
@@ -103,7 +103,8 @@ pub fn sign_msi(file: &[u8], signer: &dyn Signer, opts: &Options) -> Result<Vec<
     if root.children.iter().any(|c| c.is_storage) {
         return Err(Error::invalid("msi", "storages", "packages with embedded storages (transforms, nested databases) can't be re-signed yet"));
     }
-    let mut streams: Vec<Stream> = root.children.iter().filter(|c| !name_is(c, DIGITAL_SIGNATURE) && !name_is(c, DIGITAL_SIGNATURE_EX)).map(|c| Stream { name: c.name.clone(), data: c.data.clone() }).collect();
+    let mut streams: Vec<Stream> =
+        root.children.iter().filter(|c| !name_is(c, DIGITAL_SIGNATURE) && !name_is(c, DIGITAL_SIGNATURE_EX)).map(|c| Stream { name: c.name.clone(), data: c.data.clone() }).collect();
     // The metadata pre-hash covers the database as written without either signature stream.
     let bare = cfb::write(&streams, root.clsid)?;
     streams.push(Stream::new(DIGITAL_SIGNATURE_EX, metadata_hash(&bare, opts.digest)?));
@@ -163,7 +164,7 @@ pub fn verify_msi(file: &[u8]) -> Result<Option<Verified>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::msi::{col, Database, Table};
+    use crate::format::msi::{Database, Table, col};
     use crate::sign::KeySigner;
 
     #[test]

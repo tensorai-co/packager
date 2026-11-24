@@ -2,10 +2,10 @@
 //! or raw), a `blkx` table describing them in an XML resource plist, and the 512-byte `koly`
 //! trailer. The layout matches `hdiutil create -layout NONE -format UDZO`.
 
-use crate::compress::{unzlib, zlib, Level};
-use crate::crypto::crc::{crc32, Crc32};
+use crate::compress::{Level, unzlib, zlib};
+use crate::crypto::crc::{Crc32, crc32};
 use crate::format::plist::{Dict, Value};
-use crate::util::{be32, PutBe};
+use crate::util::{PutBe, be32};
 use crate::{Error, Result};
 
 const SECTOR: usize = 512;
@@ -35,7 +35,7 @@ impl PartitionType {
 
 /// Wraps a raw volume (a multiple of 512 bytes) as a zlib-compressed UDIF image.
 pub fn write_udzo(volume: &[u8], ptype: PartitionType, level: Level) -> Result<Vec<u8>> {
-    if volume.len() % SECTOR != 0 {
+    if !volume.len().is_multiple_of(SECTOR) {
         return Err(Error::Other("udif: volume size isn't a multiple of 512".into()));
     }
     let sectors = volume.len() / SECTOR;
@@ -88,10 +88,7 @@ pub fn write_udzo(volume: &[u8], ptype: PartitionType, level: Level) -> Result<V
         d.insert("Name", name);
         Value::Dict(d)
     };
-    let resources = Value::Dict(Dict::new().with(
-        "resource-fork",
-        Dict::new().with("blkx", vec![entry(mish, ptype.name())]).with("plst", vec![entry(vec![0u8; 1032], "")]),
-    ));
+    let resources = Value::Dict(Dict::new().with("resource-fork", Dict::new().with("blkx", vec![entry(mish, ptype.name())]).with("plst", vec![entry(vec![0u8; 1032], "")])));
     let xml = resources.to_xml().into_bytes();
 
     let xml_offset = data.len() as u64;
@@ -150,12 +147,7 @@ pub fn read(image: &[u8]) -> Result<Vec<u8>> {
     let (xml_off, xml_len) = (u64at(k, 216) as usize, u64at(k, 224) as usize);
     let xml = image.get(xml_off..xml_off + xml_len).ok_or_else(|| bad("plist out of range"))?;
     let v = Value::parse(xml)?;
-    let blkx = v
-        .as_dict()
-        .and_then(|d| d.get("resource-fork"))
-        .and_then(|r| r.as_dict())
-        .and_then(|r| r.get("blkx"))
-        .ok_or_else(|| bad("no blkx resource"))?;
+    let blkx = v.as_dict().and_then(|d| d.get("resource-fork")).and_then(|r| r.as_dict()).and_then(|r| r.get("blkx")).ok_or_else(|| bad("no blkx resource"))?;
     let Value::Array(parts) = blkx else { return Err(bad("blkx isn't an array")) };
     let mut out = Vec::new();
     for p in parts {

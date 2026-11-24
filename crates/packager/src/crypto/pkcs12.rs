@@ -3,8 +3,8 @@
 
 use crate::crypto::cipher::{aes_cbc_decrypt, des3_cbc_decrypt, rc2_cbc_decrypt};
 use crate::crypto::der::{self, oids, tag};
-use crate::crypto::hmac::{hmac, pbkdf2, HashAlg};
-use crate::crypto::keys::{hash_for_digest_oid, PrivateKey};
+use crate::crypto::hmac::{HashAlg, hmac, pbkdf2};
+use crate::crypto::keys::{PrivateKey, hash_for_digest_oid};
 use crate::crypto::x509::Certificate;
 use crate::{Error, Result};
 
@@ -276,10 +276,7 @@ impl Pkcs12 {
         }
         let (key_id, key) = keys.into_iter().next().ok_or_else(|| bad("no private key in the file"))?;
         let public = key.public();
-        let leaf_idx = certs
-            .iter()
-            .position(|(id, c)| (key_id.is_some() && *id == key_id) || c.public_key == public)
-            .ok_or_else(|| bad("no certificate matches the private key"))?;
+        let leaf_idx = certs.iter().position(|(id, c)| (key_id.is_some() && *id == key_id) || c.public_key == public).ok_or_else(|| bad("no certificate matches the private key"))?;
         let (_, leaf) = certs.remove(leaf_idx);
         Ok(Pkcs12 { key, leaf, others: certs.into_iter().map(|(_, c)| c).collect() })
     }

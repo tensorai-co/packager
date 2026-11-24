@@ -6,7 +6,7 @@ use crate::error::IoContext;
 use crate::format::cpio::{Node, NodeKind};
 use crate::format::elf::{self, Elf};
 use crate::format::xml::Element;
-use crate::util::{slash_path, walk, EntryKind};
+use crate::util::{EntryKind, slash_path, walk};
 use crate::{Error, Result};
 
 /// The Linux architectures `app` has binaries for (optionally narrowed to `only`), in a stable
@@ -151,7 +151,9 @@ pub fn mime_package_xml(types: &[MimeType]) -> Option<String> {
     }
     let mut root = Element::new("mime-info").attr("xmlns", "http://www.freedesktop.org/standards/shared-mime-info");
     for t in custom {
-        root = root.child(Element::new("mime-type").attr("type", t.mime.as_str()).child(Element::new("comment").text(t.name.as_str())).child(Element::new("glob").attr("pattern", format!("*.{}", t.extension))));
+        root = root.child(
+            Element::new("mime-type").attr("type", t.mime.as_str()).child(Element::new("comment").text(t.name.as_str())).child(Element::new("glob").attr("pattern", format!("*.{}", t.extension))),
+        );
     }
     Some(root.to_document(2))
 }
@@ -199,7 +201,13 @@ pub fn desktop_entry(app: &App, e: &DesktopEntry) -> String {
     }
     // %U for URL handlers, %F for documents, nothing otherwise.
     let has_urls = e.mime_types.iter().any(|m| m.starts_with("x-scheme-handler/"));
-    let code = if has_urls { " %U" } else if !e.mime_types.is_empty() { " %F" } else { "" };
+    let code = if has_urls {
+        " %U"
+    } else if !e.mime_types.is_empty() {
+        " %F"
+    } else {
+        ""
+    };
     s.push_str(&format!("Exec={}{code}\n", e.exec));
     if let Some(i) = &e.icon {
         s.push_str(&format!("Icon={}\n", desktop_escape(i)));
@@ -240,7 +248,15 @@ pub fn resource_nodes(app: &App, prefix: &str, mtime: i64, reserved: &[&str]) ->
             return Err(Error::invalid("app", "resources", format!("destination `{}` leaves the install directory", r.dest)));
         }
         let top = dest.split('/').next().unwrap_or_default();
-        let join = |rel: &str| if dest.is_empty() { rel.to_string() } else if rel.is_empty() { dest.to_string() } else { format!("{dest}/{rel}") };
+        let join = |rel: &str| {
+            if dest.is_empty() {
+                rel.to_string()
+            } else if rel.is_empty() {
+                dest.to_string()
+            } else {
+                format!("{dest}/{rel}")
+            }
+        };
         if std::fs::metadata(&r.source).at(&r.source)?.is_dir() {
             if !dest.is_empty() {
                 out.push(node(format!("{prefix}/{dest}"), NodeKind::Dir, 0o755));

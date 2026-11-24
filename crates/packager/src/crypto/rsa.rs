@@ -124,7 +124,7 @@ impl RsaPrivateKey {
 
     /// Generates a key with `bits`-bit modulus and e = 65537.
     pub fn generate(bits: usize) -> Result<Self> {
-        if bits < 1024 || bits % 2 != 0 {
+        if bits < 1024 || !bits.is_multiple_of(2) {
             return Err(Error::Other("rsa: key size must be an even number of bits ≥ 1024".into()));
         }
         let e = BigUint::from_u64(65537);

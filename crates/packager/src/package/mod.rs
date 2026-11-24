@@ -1,4 +1,4 @@
-//! The high-level builders: each maps an [`App`](crate::App) to one package format.
+//! The high-level builders: each maps an [`App`] to one package format.
 
 pub mod app_bundle;
 pub mod deb;
@@ -22,11 +22,11 @@ pub use msix::{Msix, MsixBundle};
 pub use pkg::Pkg;
 pub use snap::{Confinement, Snap};
 
+use crate::Result;
 use crate::app::App;
-use crate::crypto::{hex, Sha256};
+use crate::crypto::{Sha256, hex};
 use crate::error::IoContext;
 use crate::sign::Apple;
-use crate::Result;
 
 /// The kind of a built package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,7 +126,8 @@ impl Package {
     }
     /// Re-reads size and hash after stapling, and marks it notarized.
     pub(crate) fn mark_notarized(&mut self) -> Result<()> {
-        let fresh = if self.path.is_dir() { Package::dir(self.kind, self.arch.clone(), self.path.clone(), self.signed)? } else { Package::file(self.kind, self.arch.clone(), self.path.clone(), self.signed)? };
+        let fresh =
+            if self.path.is_dir() { Package::dir(self.kind, self.arch.clone(), self.path.clone(), self.signed)? } else { Package::file(self.kind, self.arch.clone(), self.path.clone(), self.signed)? };
         *self = Package { notarized: true, ..fresh };
         Ok(())
     }

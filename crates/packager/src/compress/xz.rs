@@ -1,7 +1,7 @@
 //! The `.xz` container (one stream, one block, the LZMA2 filter), as `xz`, `dpkg` and the Linux
 //! kernel's SquashFS driver read it.
 
-use super::lzma::{self, dict_size_byte, dict_size_from_byte, Options};
+use super::lzma::{self, Options, dict_size_byte, dict_size_from_byte};
 use crate::crypto::crc::crc32;
 use crate::{Error, Result};
 
@@ -79,7 +79,7 @@ fn read_varint(data: &[u8], p: &mut usize) -> Result<u64> {
 }
 
 fn pad4(out: &mut Vec<u8>) {
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }

@@ -12,13 +12,13 @@ use std::path::PathBuf;
 
 use crate::app::{App, Arch};
 use crate::compress::lzma::Options as LzmaOptions;
-use crate::compress::{gzip, xz, Level};
+use crate::compress::{Level, gzip, xz};
 use crate::crypto::{hex, md5};
 use crate::error::IoContext;
 use crate::format::cpio::{Node, NodeKind};
 use crate::format::{ar, tar};
 use crate::identity::{deb_name, deb_version};
-use crate::package::linux::{self, complete_tree, DesktopEntry};
+use crate::package::linux::{self, DesktopEntry, complete_tree};
 use crate::package::{Context, Package, PackageBuilder, PackageKind};
 use crate::util::{rfc2822, source_date_epoch};
 use crate::{Error, Result};
@@ -291,7 +291,8 @@ impl Deb {
         }
         let control = self.control(app, &name, &version, linux::arch_label(arch), installed_kb, &depends);
 
-        let mut control_nodes = vec![node(".".into(), NodeKind::Dir, 0o755), node("./control".into(), NodeKind::File(control.into_bytes()), 0o644), node("./md5sums".into(), NodeKind::File(md5sums.into_bytes()), 0o644)];
+        let mut control_nodes =
+            vec![node(".".into(), NodeKind::Dir, 0o755), node("./control".into(), NodeKind::File(control.into_bytes()), 0o644), node("./md5sums".into(), NodeKind::File(md5sums.into_bytes()), 0o644)];
         for kind in ["preinst", "postinst", "prerm", "postrm"] {
             if let Some((_, p)) = self.scripts.iter().find(|(k, _)| *k == kind) {
                 let data = std::fs::read(p).at(p)?;
@@ -307,7 +308,11 @@ impl Deb {
             DebCompression::Gzip => ("gz", gzip(&control_tar, Level::BEST), gzip(&data_tar, Level::BEST)),
             DebCompression::Xz => ("xz", xz::xz(&control_tar, &LzmaOptions::DEFAULT), xz::xz(&data_tar, &LzmaOptions::DEFAULT)),
         };
-        ar::write(&[ar::Member::new("debian-binary", mtime, b"2.0\n".to_vec()), ar::Member::new(format!("control.tar.{ext}"), mtime, control_c), ar::Member::new(format!("data.tar.{ext}"), mtime, data_c)])
+        ar::write(&[
+            ar::Member::new("debian-binary", mtime, b"2.0\n".to_vec()),
+            ar::Member::new(format!("control.tar.{ext}"), mtime, control_c),
+            ar::Member::new(format!("data.tar.{ext}"), mtime, data_c),
+        ])
     }
 
     fn control(&self, app: &App, name: &str, version: &str, arch: &str, installed_kb: u64, depends: &[String]) -> String {
@@ -531,7 +536,16 @@ mod tests {
             assert_eq!(info.field("Depends"), Some("libgtk-3-0"), "a static stub binary needs no libc");
             assert!(info.field("Description").unwrap().starts_with("Writes notes\n A longer explanation\n over two lines."), "{:?}", info.field("Description"));
             let paths: Vec<&str> = info.files.iter().map(|f| f.path.as_str()).collect();
-            for want in [".", "./opt/myapp/my-app", "./opt/myapp/web/index.html", "./opt/myapp/web/assets/app.js", "./usr/bin/my-app", "./usr/share/applications/com.example.myapp.desktop", "./usr/share/doc/myapp/copyright", "./usr/share/doc/myapp/changelog.Debian.gz"] {
+            for want in [
+                ".",
+                "./opt/myapp/my-app",
+                "./opt/myapp/web/index.html",
+                "./opt/myapp/web/assets/app.js",
+                "./usr/bin/my-app",
+                "./usr/share/applications/com.example.myapp.desktop",
+                "./usr/share/doc/myapp/copyright",
+                "./usr/share/doc/myapp/changelog.Debian.gz",
+            ] {
                 assert!(paths.contains(&want), "missing {want} in {paths:?}");
             }
             let link = info.files.iter().find(|f| f.path == "./usr/bin/my-app").unwrap();

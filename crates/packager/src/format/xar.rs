@@ -1,7 +1,7 @@
 //! XAR archives: the container of flat `.pkg` installers. A 28-byte header, a zlib-compressed
 //! XML table of contents, then the heap (the TOC's SHA-1 first, then file data).
 
-use crate::compress::{unzlib, zlib, Level};
+use crate::compress::{Level, unzlib, zlib};
 use crate::crypto::sha1;
 use crate::format::xml::{self, Element};
 use crate::util::{be16, be32, iso8601};

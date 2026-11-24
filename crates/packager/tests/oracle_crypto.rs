@@ -6,7 +6,7 @@ use std::process::Command;
 
 use packager::crypto::ec::{Curve, EcPrivateKey};
 use packager::crypto::hmac::HashAlg;
-use packager::crypto::keys::{pem_encode, PrivateKey};
+use packager::crypto::keys::{PrivateKey, pem_encode};
 use packager::crypto::pkcs12::Pkcs12;
 use packager::crypto::x509::Certificate;
 

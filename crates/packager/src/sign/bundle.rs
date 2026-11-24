@@ -8,9 +8,9 @@ use crate::crypto::{sha1, sha256};
 use crate::error::IoContext;
 use crate::format::macho::{self, CPU_TYPE_ARM64};
 use crate::format::plist::{Dict, Value};
-use crate::sign::apple::{sign_macho, CodeSignOptions, Signed};
 use crate::sign::AppleIdentity;
-use crate::util::{slash_path, walk, EntryKind};
+use crate::sign::apple::{CodeSignOptions, Signed, sign_macho};
+use crate::util::{EntryKind, slash_path, walk};
 use crate::{Error, Result};
 
 /// Directories whose contents are nested code rather than resources (codesign's `rules2`).
@@ -72,10 +72,7 @@ fn layout(bundle: &Path) -> Result<Layout> {
     let bytes = std::fs::read(&info_plist).at(&info_plist)?;
     let info = Value::parse(&bytes)?;
     let info = info.as_dict().ok_or_else(|| Error::malformed("plist", "Info.plist root isn't a dictionary"))?;
-    let identifier = info
-        .get_str("CFBundleIdentifier")
-        .ok_or_else(|| Error::invalid("app", "CFBundleIdentifier", format!("is missing from {}", info_plist.display())))?
-        .to_string();
+    let identifier = info.get_str("CFBundleIdentifier").ok_or_else(|| Error::invalid("app", "CFBundleIdentifier", format!("is missing from {}", info_plist.display())))?.to_string();
     // Without CFBundleExecutable, CoreFoundation uses the bundle's own name.
     let executable = match info.get_str("CFBundleExecutable") {
         Some(e) => Some(exe_dir.join(e)),
@@ -129,9 +126,7 @@ pub fn sign_bundle(bundle: &Path, opts: &BundleSignOptions) -> Result<Signed> {
 
 fn sign_bundle_inner(bundle: &Path, opts: &BundleSignOptions, outermost: bool) -> Result<(Signed, Vec<u32>)> {
     let lay = layout(bundle)?;
-    let exe = lay.executable.clone().ok_or_else(|| {
-        Error::invalid("app", "CFBundleExecutable", format!("is missing from {}", lay.info_plist.display()))
-    })?;
+    let exe = lay.executable.clone().ok_or_else(|| Error::invalid("app", "CFBundleExecutable", format!("is missing from {}", lay.info_plist.display())))?;
     let entries = walk(&lay.content)?;
     let sig_dir = lay.content.join("_CodeSignature");
 
@@ -220,10 +215,7 @@ fn sign_bundle_inner(bundle: &Path, opts: &BundleSignOptions, outermost: bool) -
     // 4. The main executable, binding Info.plist and CodeResources.
     let info = std::fs::read(&lay.info_plist).at(&lay.info_plist)?;
     let exe_data = std::fs::read(&exe).at(&exe)?;
-    let is_exe = macho::slices(&exe_data)
-        .ok()
-        .and_then(|s| macho::Image::parse(&s[0].data).ok())
-        .is_some_and(|i| i.filetype == macho::MH_EXECUTE);
+    let is_exe = macho::slices(&exe_data).ok().and_then(|s| macho::Image::parse(&s[0].data).ok()).is_some_and(|i| i.filetype == macho::MH_EXECUTE);
     let mut o = opts.code(lay.identifier.clone());
     o.hardened_runtime = opts.hardened_runtime && is_exe;
     o.entitlements = if outermost { opts.entitlements.clone() } else { None };
@@ -309,10 +301,7 @@ fn rules2() -> Dict {
     Dict::new()
         .with(".*\\.dSYM($|/)", weighted(11, &[]))
         .with("^(.*/)?\\.DS_Store$", weighted(2000, &[("omit", true)]))
-        .with(
-            "^(Frameworks|SharedFrameworks|PlugIns|Plug-ins|XPCServices|Helpers|MacOS|Library/(Automator|Spotlight|LoginItems))/",
-            weighted(10, &[("nested", true)]),
-        )
+        .with("^(Frameworks|SharedFrameworks|PlugIns|Plug-ins|XPCServices|Helpers|MacOS|Library/(Automator|Spotlight|LoginItems))/", weighted(10, &[("nested", true)]))
         .with("^.*", true)
         .with("^Info\\.plist$", weighted(20, &[("omit", true)]))
         .with("^PkgInfo$", weighted(20, &[("omit", true)]))

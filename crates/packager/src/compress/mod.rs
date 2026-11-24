@@ -6,7 +6,7 @@ pub mod inflate;
 pub mod lzma;
 pub mod xz;
 
-pub use deflate::{deflate, Level};
+pub use deflate::{Level, deflate};
 pub use inflate::inflate;
 pub use xz::{unxz, xz};
 
@@ -24,7 +24,7 @@ pub fn zlib(data: &[u8], level: Level) -> Vec<u8> {
 
 /// Decodes a zlib stream, checking its Adler-32.
 pub fn unzlib(data: &[u8]) -> Result<Vec<u8>> {
-    if data.len() < 6 || (u16::from_be_bytes([data[0], data[1]]) % 31 != 0) || data[0] & 0x0f != 8 {
+    if data.len() < 6 || !u16::from_be_bytes([data[0], data[1]]).is_multiple_of(31) || data[0] & 0x0f != 8 {
         return Err(Error::malformed("zlib", "bad header"));
     }
     if data[1] & 0x20 != 0 {
@@ -128,7 +128,14 @@ mod tests {
         assert!(deflate(&zeros, Level::DEFAULT).len() < 2000);
         // Random data falls back to stored blocks with little overhead.
         let mut x = 1u32;
-        let rnd: Vec<u8> = (0..100_000).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; x as u8 }).collect();
+        let rnd: Vec<u8> = (0..100_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
         assert!(deflate(&rnd, Level::DEFAULT).len() < rnd.len() + 100);
     }
 }

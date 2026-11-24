@@ -4,10 +4,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use packager::notary::{log_issues, ApiKey, Notarize, Notary};
+use packager::notary::{ApiKey, Notarize, Notary, log_issues};
 use packager::sign::assess::assess;
-use packager::sign::installer::{sign_pkg, verify_pkg, InstallerSignOptions};
-use packager::sign::{timestamp, AppleIdentity};
+use packager::sign::installer::{InstallerSignOptions, sign_pkg, verify_pkg};
+use packager::sign::{AppleIdentity, timestamp};
 use packager::staple::{self, Lookup};
 use packager::transport::Curl;
 
@@ -25,7 +25,8 @@ The API key also comes from PACKAGER_NOTARY_KEY, PACKAGER_NOTARY_KEY_ID and
 PACKAGER_NOTARY_ISSUER (omit the issuer for individual keys).";
 
 fn api_key(a: &Args) -> Result<ApiKey, String> {
-    let path = a.value("key").map(String::from).or_else(|| std::env::var("PACKAGER_NOTARY_KEY").ok()).ok_or("give the App Store Connect API key with --key AuthKey_<ID>.p8 (or PACKAGER_NOTARY_KEY)")?;
+    let path =
+        a.value("key").map(String::from).or_else(|| std::env::var("PACKAGER_NOTARY_KEY").ok()).ok_or("give the App Store Connect API key with --key AuthKey_<ID>.p8 (or PACKAGER_NOTARY_KEY)")?;
     let id = a.value("key-id").map(String::from).or_else(|| std::env::var("PACKAGER_NOTARY_KEY_ID").ok());
     let issuer = a.value("issuer").map(String::from).or_else(|| std::env::var("PACKAGER_NOTARY_ISSUER").ok());
     ApiKey::from_file(&path, id.as_deref(), issuer.as_deref()).map_err(|e| e.to_string())

@@ -225,11 +225,7 @@ pub fn validate(path: impl AsRef<Path>) -> Result<()> {
     let ticket = stapled_ticket(p)?.ok_or_else(|| Error::Other(format!("{}: no ticket stapled", p.display())))?;
     let (_, record) = ticket_record(p)?;
     let digest = crate::crypto::unhex(record.rsplit('/').next().unwrap_or_default())?;
-    if ticket_covers(&ticket, &digest) {
-        Ok(())
-    } else {
-        Err(Error::Other(format!("{}: the stapled ticket is for different code", p.display())))
-    }
+    if ticket_covers(&ticket, &digest) { Ok(()) } else { Err(Error::Other(format!("{}: the stapled ticket is for different code", p.display()))) }
 }
 
 #[cfg(test)]

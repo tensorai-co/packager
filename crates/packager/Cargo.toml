@@ -1,12 +1,14 @@
 [package]
 name = "packager"
 description = "Native OS installers and packages from scratch, in pure Rust, with zero dependencies"
-keywords = ["installer", "dmg", "pkg", "codesign", "packaging"]
-categories = ["development-tools"]
+keywords = ["installer", "packaging", "msi", "dmg", "deb"]
+categories = ["development-tools", "development-tools::build-utils", "os"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 
 [lints]

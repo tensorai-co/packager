@@ -11,7 +11,7 @@ use crate::error::IoContext;
 use crate::format::cpio::{Node, NodeKind};
 use crate::format::squashfs::{self, Compression};
 use crate::identity::{snap_name, snap_version};
-use crate::package::linux::{self, complete_tree, DesktopEntry};
+use crate::package::linux::{self, DesktopEntry, complete_tree};
 use crate::package::{Context, Package, PackageBuilder, PackageKind};
 use crate::util::source_date_epoch;
 use crate::{Error, Result};
@@ -344,7 +344,19 @@ mod tests {
         snap.validate(&app).unwrap();
         let bytes = snap.package_bytes(&app, Arch::LinuxX64).unwrap();
         let yaml = read_snap_yaml(&bytes).unwrap();
-        for want in ["name: myapp\n", "version: '1.4.0'\n", "summary: 'Writes notes.'\n", "base: core24\n", "grade: stable\n", "confinement: strict\n", "- amd64\n", "  myapp:\n    command: my-app\n", "    - wayland\n", "      FOO: '$SNAP/x'\n", "description: |\n  Writes notes.\n\n  In detail.\n"] {
+        for want in [
+            "name: myapp\n",
+            "version: '1.4.0'\n",
+            "summary: 'Writes notes.'\n",
+            "base: core24\n",
+            "grade: stable\n",
+            "confinement: strict\n",
+            "- amd64\n",
+            "  myapp:\n    command: my-app\n",
+            "    - wayland\n",
+            "      FOO: '$SNAP/x'\n",
+            "description: |\n  Writes notes.\n\n  In detail.\n",
+        ] {
             assert!(yaml.contains(want), "missing {want:?} in\n{yaml}");
         }
         let nodes = squashfs::read(&bytes).unwrap();

@@ -4,7 +4,7 @@
 //! Each block is compressed on its own, which every MSZIP decoder accepts (they keep the
 //! previous block as history, but nothing here refers back to it).
 
-use crate::compress::{deflate, Level};
+use crate::compress::{Level, deflate};
 use crate::{Error, Result};
 
 const BLOCK: usize = 32 * 1024;
@@ -21,11 +21,10 @@ pub struct CabFile {
 /// The CFDATA checksum (MS-CAB `CSUMCompute`).
 fn checksum(data: &[u8], seed: u32) -> u32 {
     let mut csum = seed;
-    let mut chunks = data.chunks_exact(4);
-    for c in &mut chunks {
-        csum ^= u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+    let (words, rest) = data.as_chunks::<4>();
+    for c in words {
+        csum ^= u32::from_le_bytes(*c);
     }
-    let rest = chunks.remainder();
     let mut ul = 0u32;
     for &b in rest {
         ul = (ul << 8) | u32::from(b);
@@ -120,7 +119,7 @@ pub fn write(files: &[CabFile], mtime: i64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Reads a cabinet written by [`write`] (one MSZIP folder of independent blocks): the files.
+/// Reads a cabinet written by [`write()`] (one MSZIP folder of independent blocks): the files.
 pub fn read(data: &[u8]) -> Result<Vec<CabFile>> {
     let bad = |m: &str| Error::malformed("cab", m);
     let le16 = |p: usize| data.get(p..p + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize).ok_or_else(|| bad("truncated"));

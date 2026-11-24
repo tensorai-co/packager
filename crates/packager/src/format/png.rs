@@ -1,6 +1,6 @@
 //! PNG decode (every bit depth, color type and Adam7 interlacing, to RGBA8) and encode (RGBA8).
 
-use crate::compress::{unzlib, zlib, Level};
+use crate::compress::{Level, unzlib, zlib};
 use crate::crypto::crc::Crc32;
 use crate::image::Image;
 use crate::{Error, Result};
@@ -31,13 +31,7 @@ pub fn decode(data: &[u8]) -> Result<Image> {
                 if body.len() != 13 {
                     return Err(bad("bad IHDR"));
                 }
-                ihdr = Some((
-                    u32::from_be_bytes(body[0..4].try_into().unwrap_or_default()),
-                    u32::from_be_bytes(body[4..8].try_into().unwrap_or_default()),
-                    body[8],
-                    body[9],
-                    body[12],
-                ));
+                ihdr = Some((u32::from_be_bytes(body[0..4].try_into().unwrap_or_default()), u32::from_be_bytes(body[4..8].try_into().unwrap_or_default()), body[8], body[9], body[12]));
             }
             b"PLTE" => palette = body.chunks(3).filter(|c| c.len() == 3).map(|c| [c[0], c[1], c[2], 255]).collect(),
             b"tRNS" => trns = Some(body.to_vec()),
@@ -78,11 +72,7 @@ pub fn decode(data: &[u8]) -> Result<Image> {
     let raw = unzlib(&idat)?;
     let bpp_bits = channels * depth as usize;
     let mut out = vec![0u8; w as usize * h as usize * 4];
-    let passes: &[(usize, usize, usize, usize)] = if interlace == 1 {
-        &[(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
-    } else {
-        &[(0, 0, 1, 1)]
-    };
+    let passes: &[(usize, usize, usize, usize)] = if interlace == 1 { &[(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)] } else { &[(0, 0, 1, 1)] };
     let mut off = 0;
     for &(x0, y0, dx, dy) in passes {
         let pw = (w as usize).saturating_sub(x0).div_ceil(dx);

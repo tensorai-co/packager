@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use crate::error::IoContext;
-use crate::util::{slash_path, walk, EntryKind};
+use crate::util::{EntryKind, slash_path, walk};
 use crate::{Error, Result};
 
 /// What a tree entry is.
@@ -135,9 +135,7 @@ fn octal_header(out: &mut Vec<u8>, ino: u64, mode: u64, uid: u64, gid: u64, nlin
 /// Reads an odc archive back into (path, mode, data) triples.
 pub fn read_odc(data: &[u8]) -> Result<Vec<(String, u32, Vec<u8>)>> {
     let bad = |m: &str| Error::malformed("cpio", m);
-    let num = |s: &[u8]| -> Result<u64> {
-        u64::from_str_radix(std::str::from_utf8(s).map_err(|_| bad("non-ASCII header"))?, 8).map_err(|_| bad("bad octal field"))
-    };
+    let num = |s: &[u8]| -> Result<u64> { u64::from_str_radix(std::str::from_utf8(s).map_err(|_| bad("non-ASCII header"))?, 8).map_err(|_| bad("bad octal field")) };
     let mut p = 0;
     let mut out = Vec::new();
     loop {

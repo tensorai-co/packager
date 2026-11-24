@@ -1,15 +1,21 @@
 [package]
 name = "packager-cli"
 description = "The `packager` command: packager.toml and arguments in, native packages out"
+keywords = ["installer", "packaging", "codesign", "msi", "deb"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
 
 [[bin]]
 name = "packager"
 path = "src/main.rs"
+# The library has the same name; its docs are the ones worth building.
+doc = false
 
 [dependencies]
 packager = { path = "../packager" }

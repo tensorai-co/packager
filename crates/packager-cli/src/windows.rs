@@ -5,8 +5,8 @@ use std::path::Path;
 
 use packager::crypto::hmac::HashAlg;
 use packager::format::pe::{Image, VersionInfo};
-use packager::sign::authenticode::{self, Options};
 use packager::sign::AppleIdentity;
+use packager::sign::authenticode::{self, Options};
 
 use crate::Args;
 

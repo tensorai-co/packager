@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use crate::Result;
 use crate::error::IoContext;
 use crate::format::{icns, ico, png};
-use crate::Result;
 
 /// An 8-bit RGBA image with straight (non-premultiplied) alpha, rows top to bottom.
 #[derive(Debug, Clone, PartialEq, Eq)]

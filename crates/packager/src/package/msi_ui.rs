@@ -3,7 +3,7 @@
 //! errors, files in use, a cancel confirmation, and a premature or cancelled end. Without it, a
 //! package shows only Windows Installer's basic progress UI.
 
-use crate::format::msi::{col, Table, Value};
+use crate::format::msi::{Table, Value, col};
 
 /// The UI tables, and the `InstallUISequence` rows to add.
 pub struct Ui {
@@ -32,7 +32,20 @@ impl Builder {
     fn dialog(&mut self, name: &str, attrs: i32, first: &str, default: Option<&str>, cancel: Option<&str>, controls: &[Ctl]) {
         self.dialog.row(vec![name.into(), 50.into(), 50.into(), W.into(), H.into(), attrs.into(), "[ProductName] Setup".into(), first.into(), default.into(), cancel.into()]);
         for (c, ty, x, y, w, h, a, prop, text, next) in controls {
-            self.control.row(vec![name.into(), (*c).into(), (*ty).into(), (*x).into(), (*y).into(), (*w).into(), (*h).into(), (*a).into(), (*prop).into(), text.map(Value::from).unwrap_or(Value::Null), (*next).into(), Value::Null]);
+            self.control.row(vec![
+                name.into(),
+                (*c).into(),
+                (*ty).into(),
+                (*x).into(),
+                (*y).into(),
+                (*w).into(),
+                (*h).into(),
+                (*a).into(),
+                (*prop).into(),
+                text.map(Value::from).unwrap_or(Value::Null),
+                (*next).into(),
+                Value::Null,
+            ]);
         }
     }
     fn on(&mut self, dialog: &str, control: &str, event: &str, arg: &str, cond: &str, order: i32) {
@@ -54,11 +67,35 @@ pub fn wizard(elevated: bool) -> Ui {
     let mut b = Builder {
         dialog: Table::new(
             "Dialog",
-            vec![col("Dialog", "*s72"), col("HCentering", "i2"), col("VCentering", "i2"), col("Width", "i2"), col("Height", "i2"), col("Attributes", "i4?"), col("Title", "l128?"), col("Control_First", "s50"), col("Control_Default", "s50?"), col("Control_Cancel", "s50?")],
+            vec![
+                col("Dialog", "*s72"),
+                col("HCentering", "i2"),
+                col("VCentering", "i2"),
+                col("Width", "i2"),
+                col("Height", "i2"),
+                col("Attributes", "i4?"),
+                col("Title", "l128?"),
+                col("Control_First", "s50"),
+                col("Control_Default", "s50?"),
+                col("Control_Cancel", "s50?"),
+            ],
         ),
         control: Table::new(
             "Control",
-            vec![col("Dialog_", "*s72"), col("Control", "*s50"), col("Type", "s20"), col("X", "i2"), col("Y", "i2"), col("Width", "i2"), col("Height", "i2"), col("Attributes", "i4?"), col("Property", "s72?"), col("Text", "l0?"), col("Control_Next", "s50?"), col("Help", "l50?")],
+            vec![
+                col("Dialog_", "*s72"),
+                col("Control", "*s50"),
+                col("Type", "s20"),
+                col("X", "i2"),
+                col("Y", "i2"),
+                col("Width", "i2"),
+                col("Height", "i2"),
+                col("Attributes", "i4?"),
+                col("Property", "s72?"),
+                col("Text", "l0?"),
+                col("Control_Next", "s50?"),
+                col("Help", "l50?"),
+            ],
         ),
         event: Table::new("ControlEvent", vec![col("Dialog_", "*s72"), col("Control_", "*s50"), col("Event", "*s50"), col("Argument", "*s255"), col("Condition", "*s255?"), col("Ordering", "i2?")]),
         mapping: Table::new("EventMapping", vec![col("Dialog_", "*s72"), col("Control_", "*s50"), col("Event", "*s50"), col("Attribute", "s50")]),
@@ -181,7 +218,9 @@ pub fn wizard(elevated: bool) -> Ui {
     style.row(vec!["DefaultFont".into(), "Segoe UI".into(), 9.into(), Value::Null, Value::Null]);
     style.row(vec!["DlgTitle".into(), "Segoe UI".into(), 12.into(), Value::Null, 1.into()]);
     let mut uitext = Table::new("UIText", vec![col("Key", "*s72"), col("Text", "l255?")]);
-    for (k, t) in [("bytes", "bytes"), ("KB", "KB"), ("MB", "MB"), ("GB", "GB"), ("AbsentPath", ""), ("NewFolder", "Folder|New Folder"), ("TimeRemaining", "Time remaining: {[1] minutes }{[2] seconds}")] {
+    for (k, t) in
+        [("bytes", "bytes"), ("KB", "KB"), ("MB", "MB"), ("GB", "GB"), ("AbsentPath", ""), ("NewFolder", "Folder|New Folder"), ("TimeRemaining", "Time remaining: {[1] minutes }{[2] seconds}")]
+    {
         uitext.row(vec![k.into(), t.into()]);
     }
     // FilesInUse lists processes in a ListBox, filled at run time (ICE20 wants the table).

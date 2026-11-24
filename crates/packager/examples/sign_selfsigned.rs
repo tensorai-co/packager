@@ -1,6 +1,6 @@
 //! `cargo run --example sign_selfsigned -- <in> <out> [--no-runtime]`: signs with a throwaway
 //! self-signed certificate.
-use packager::sign::apple::{sign_macho, CodeSignOptions};
+use packager::sign::apple::{CodeSignOptions, sign_macho};
 use packager::sign::{AppleIdentity, KeySigner};
 
 fn main() -> packager::Result<()> {

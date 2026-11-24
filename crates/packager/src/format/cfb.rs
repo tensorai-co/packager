@@ -154,7 +154,17 @@ pub fn write(streams: &[Stream], root_clsid: [u8; 16]) -> Result<Vec<u8>> {
     let minifat_sectors = minifat_padded.len() / SECTOR;
 
     // Directory: root, then streams in sorted order; one balanced tree of siblings.
-    let mut entries = vec![Entry { name: "Root Entry".encode_utf16().collect(), kind: 5, color: 1, left: NOSTREAM, right: NOSTREAM, child: NOSTREAM, clsid: root_clsid, start: mini_start, size: mini_stream.len() as u64 }];
+    let mut entries = vec![Entry {
+        name: "Root Entry".encode_utf16().collect(),
+        kind: 5,
+        color: 1,
+        left: NOSTREAM,
+        right: NOSTREAM,
+        child: NOSTREAM,
+        clsid: root_clsid,
+        start: mini_start,
+        size: mini_stream.len() as u64,
+    }];
     if mini_stream.is_empty() {
         entries[0].start = ENDOFCHAIN;
     }
@@ -165,7 +175,7 @@ pub fn write(streams: &[Stream], root_clsid: [u8; 16]) -> Result<Vec<u8>> {
     let max_depth = if ids.is_empty() { 0 } else { (usize::BITS - ids.len().leading_zeros()) as usize - 1 };
     entries[0].child = tree(&mut entries, &ids, 0, max_depth);
     let mut dir: Vec<u8> = entries.iter().flat_map(|e| e.bytes()).collect();
-    while dir.len() % SECTOR != 0 {
+    while !dir.len().is_multiple_of(SECTOR) {
         dir.extend_from_slice(&Entry { name: Vec::new(), kind: 0, color: 0, left: NOSTREAM, right: NOSTREAM, child: NOSTREAM, clsid: [0; 16], start: 0, size: 0 }.bytes());
     }
     let dir_start = chain(&dir, &mut sectors, &mut fat);
@@ -318,22 +328,17 @@ pub fn read(data: &[u8]) -> Result<ReadEntry> {
     let mini_stream = if root_size > 0 { read_chain(root_start, root_size)? } else { Vec::new() };
     let minifat_first = le32(60)?;
     let minifat_bytes = if minifat_first == ENDOFCHAIN { Vec::new() } else { read_chain(minifat_first, usize::MAX)? };
-    let minifat: Vec<u32> = minifat_bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let minifat: Vec<u32> = minifat_bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     let cutoff = le32(56)? as usize;
 
-    fn build<'d>(
-        i: u32,
-        entry: &dyn Fn(u32) -> Result<&'d [u8]>,
-        stream_data: &dyn Fn(u32, usize) -> Result<Vec<u8>>,
-        depth: usize,
-    ) -> Result<ReadEntry> {
+    fn build<'d>(i: u32, entry: &dyn Fn(u32) -> Result<&'d [u8]>, stream_data: &dyn Fn(u32, usize) -> Result<Vec<u8>>, depth: usize) -> Result<ReadEntry> {
         if depth > 64 {
             return Err(Error::malformed("cfb", "directory too deep"));
         }
         let e = entry(i)?;
         let nl = (u16::from_le_bytes([e[64], e[65]]) as usize).min(64);
         let raw_name = e[..nl].to_vec();
-        let name: Vec<u16> = raw_name.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+        let name: Vec<u16> = raw_name.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
         let kind = e[66];
         let mut clsid = [0u8; 16];
         clsid.copy_from_slice(&e[80..96]);

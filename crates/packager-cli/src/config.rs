@@ -50,12 +50,9 @@ fn pair(t: &Toml, key: &str, ctx: &str) -> Result<Option<(u32, u32)>, String> {
 fn strings(t: &Toml, key: &str, ctx: &str) -> Result<Vec<String>, String> {
     match t.get(key) {
         None => Ok(Vec::new()),
-        Some(v) => v
-            .as_array()
-            .ok_or_else(|| format!("`{ctx}.{key}` must be an array"))?
-            .iter()
-            .map(|x| x.as_str().map(String::from).ok_or_else(|| format!("`{ctx}.{key}` must hold strings")))
-            .collect(),
+        Some(v) => {
+            v.as_array().ok_or_else(|| format!("`{ctx}.{key}` must be an array"))?.iter().map(|x| x.as_str().map(String::from).ok_or_else(|| format!("`{ctx}.{key}` must hold strings"))).collect()
+        }
     }
 }
 
@@ -271,14 +268,42 @@ pub fn load(path: &Path) -> Result<Config, String> {
             Some(x)
         }
     };
-    let linux_archs = |t: &Toml, ctx: &str| -> Result<Vec<Arch>, String> {
-        strings(t, "archs", ctx)?.iter().map(|a| Arch::parse(a).ok_or_else(|| format!("unknown architecture `{a}` in {ctx}.archs"))).collect()
-    };
+    let linux_archs =
+        |t: &Toml, ctx: &str| -> Result<Vec<Arch>, String> { strings(t, "archs", ctx)?.iter().map(|a| Arch::parse(a).ok_or_else(|| format!("unknown architecture `{a}` in {ctx}.archs"))).collect() };
     let deb = match section("deb") {
         None => None,
         Some(d) => {
             let ctx = "package.deb";
-            check_keys(d, &["name", "revision", "maintainer", "depends", "recommends", "auto_depends", "section", "priority", "homepage", "license", "copyright_file", "install_dir", "bin_link", "desktop_entry", "categories", "keywords", "terminal", "compression", "archs", "preinst", "postinst", "prerm", "postrm", "man_page"], ctx)?;
+            check_keys(
+                d,
+                &[
+                    "name",
+                    "revision",
+                    "maintainer",
+                    "depends",
+                    "recommends",
+                    "auto_depends",
+                    "section",
+                    "priority",
+                    "homepage",
+                    "license",
+                    "copyright_file",
+                    "install_dir",
+                    "bin_link",
+                    "desktop_entry",
+                    "categories",
+                    "keywords",
+                    "terminal",
+                    "compression",
+                    "archs",
+                    "preinst",
+                    "postinst",
+                    "prerm",
+                    "postrm",
+                    "man_page",
+                ],
+                ctx,
+            )?;
             let mut x = Deb::new();
             if let Some(v) = s(d, "name", ctx)? {
                 x = x.name(v);
@@ -455,10 +480,10 @@ pub fn load(path: &Path) -> Result<Config, String> {
                 return Err("[sign.windows] identity can't be `-`: Authenticode needs a certificate".into());
             };
             let mut a = packager::sign::Authenticode::new(signer);
-            if let Some(t) = s(sw, "timestamp", "sign.windows")? {
-                if t != "none" {
-                    a = a.timestamp(t);
-                }
+            if let Some(t) = s(sw, "timestamp", "sign.windows")?
+                && t != "none"
+            {
+                a = a.timestamp(t);
             }
             if let Some(d) = s(sw, "digest", "sign.windows")? {
                 a.digest = match d {

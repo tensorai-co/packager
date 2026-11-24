@@ -313,15 +313,8 @@ fn decode_entities(s: &str) -> Result<String> {
             "gt" => '>',
             "quot" => '"',
             "apos" => '\'',
-            _ if ent.starts_with("#x") || ent.starts_with("#X") => u32::from_str_radix(&ent[2..], 16)
-                .ok()
-                .and_then(char::from_u32)
-                .ok_or_else(|| err(format!("bad character reference `&{ent};`")))?,
-            _ if ent.starts_with('#') => ent[1..]
-                .parse::<u32>()
-                .ok()
-                .and_then(char::from_u32)
-                .ok_or_else(|| err(format!("bad character reference `&{ent};`")))?,
+            _ if ent.starts_with("#x") || ent.starts_with("#X") => u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32).ok_or_else(|| err(format!("bad character reference `&{ent};`")))?,
+            _ if ent.starts_with('#') => ent[1..].parse::<u32>().ok().and_then(char::from_u32).ok_or_else(|| err(format!("bad character reference `&{ent};`")))?,
             _ => return Err(err(format!("unknown entity `&{ent};`"))),
         };
         out.push(c);

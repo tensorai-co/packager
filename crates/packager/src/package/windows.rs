@@ -4,8 +4,8 @@
 use crate::app::{App, Arch};
 use crate::error::IoContext;
 use crate::format::pe::{Image, VersionInfo};
-use crate::sign::{authenticode, Authenticode};
-use crate::util::{slash_path, walk, EntryKind};
+use crate::sign::{Authenticode, authenticode};
+use crate::util::{EntryKind, slash_path, walk};
 use crate::{Error, Result};
 
 /// The Windows architectures `app` has binaries for, in a stable order.
@@ -71,7 +71,15 @@ pub fn resource_files(app: &App) -> Result<Vec<(String, Vec<u8>)>> {
         if r.dest.split('/').any(|c| c == "..") || r.dest.starts_with('/') {
             return Err(Error::invalid("app", "resources", format!("destination `{}` leaves the install directory", r.dest)));
         }
-        let join = |rel: &str| if dest.is_empty() { rel.to_string() } else if rel.is_empty() { dest.to_string() } else { format!("{dest}/{rel}") };
+        let join = |rel: &str| {
+            if dest.is_empty() {
+                rel.to_string()
+            } else if rel.is_empty() {
+                dest.to_string()
+            } else {
+                format!("{dest}/{rel}")
+            }
+        };
         if std::fs::metadata(&r.source).at(&r.source)?.is_dir() {
             for e in walk(&r.source)? {
                 match e.kind {

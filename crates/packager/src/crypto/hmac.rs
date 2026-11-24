@@ -1,7 +1,7 @@
 //! A common digest interface, HMAC (RFC 2104) and PBKDF2 (RFC 8018).
 
-use crate::crypto::{Sha1, Sha256};
 use crate::crypto::sha2::Sha512;
+use crate::crypto::{Sha1, Sha256};
 
 /// The hash functions the signing code can be asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

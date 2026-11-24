@@ -184,10 +184,7 @@ impl Image {
 
     /// The file offset of an RVA.
     pub fn rva_to_offset(&self, rva: u32) -> Option<usize> {
-        self.sections
-            .iter()
-            .find(|s| rva >= s.virtual_address && rva < s.virtual_address + s.virtual_size.max(s.raw_size))
-            .map(|s| (rva - s.virtual_address + s.raw_offset) as usize)
+        self.sections.iter().find(|s| rva >= s.virtual_address && rva < s.virtual_address + s.virtual_size.max(s.raw_size)).map(|s| (rva - s.virtual_address + s.raw_offset) as usize)
     }
 
     /// The certificate table (file offset, size), when signed.
@@ -212,7 +209,7 @@ impl Image {
     pub(crate) fn set_certificate_table(&mut self, table: &[u8]) -> Result<()> {
         self.strip_certificates()?;
         let off = self.data.len();
-        if off % 8 != 0 {
+        if !off.is_multiple_of(8) {
             return Err(bad("the file must be 8-byte aligned before the certificate table"));
         }
         self.data.extend_from_slice(table);
@@ -221,7 +218,7 @@ impl Image {
 
     /// Pads the file to a multiple of 8 bytes (needed before a certificate table).
     pub(crate) fn pad_to_8(&mut self) {
-        while self.data.len() % 8 != 0 {
+        while !self.data.len().is_multiple_of(8) {
             self.data.push(0);
         }
     }
@@ -596,7 +593,7 @@ impl VersionInfo {
             s.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect()
         }
         fn pad4(b: &mut Vec<u8>) {
-            while b.len() % 4 != 0 {
+            while !b.len().is_multiple_of(4) {
                 b.push(0);
             }
         }

@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use packager::compress::lzma::Options;
+use packager::compress::xz::{self, Check};
 use packager::package::{Deb, DebCompression, Snap};
 use packager::{App, Arch};
-use packager::compress::xz::{self, Check};
 
 fn have(tool: &str) -> bool {
     Command::new("sh").arg("-c").arg(format!("command -v {tool}")).output().is_ok_and(|o| o.status.success())
@@ -143,10 +143,19 @@ fn hello_binary(dir: &Path, version: &str) -> Option<PathBuf> {
     }
     std::fs::create_dir_all(dir).unwrap();
     let src = dir.join("hello.c");
-    std::fs::write(&src, "#include <stdio.h>\nint main(int argc, char **argv) {\n  printf(\"hello from packager %s\\n\", VERSION);\n  for (int i = 1; i < argc; i++) printf(\"arg %s\\n\", argv[i]);\n  return 0;\n}\n").unwrap();
+    std::fs::write(
+        &src,
+        "#include <stdio.h>\nint main(int argc, char **argv) {\n  printf(\"hello from packager %s\\n\", VERSION);\n  for (int i = 1; i < argc; i++) printf(\"arg %s\\n\", argv[i]);\n  return 0;\n}\n",
+    )
+    .unwrap();
     let bin = dir.join(format!("hello-{version}")).join("my-app");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    run(Command::new("cc").args(["-O2", "-s", "-Wl,-z,relro,-z,now", "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-fPIE", "-pie"]).arg(format!("-DVERSION=\"{version}\"")).arg(&src).arg("-o").arg(&bin));
+    run(Command::new("cc")
+        .args(["-O2", "-s", "-Wl,-z,relro,-z,now", "-fstack-protector-strong", "-D_FORTIFY_SOURCE=2", "-fPIE", "-pie"])
+        .arg(format!("-DVERSION=\"{version}\""))
+        .arg(&src)
+        .arg("-o")
+        .arg(&bin));
     Some(bin)
 }
 
@@ -165,7 +174,14 @@ fn test_app(dir: &Path, version: &str) -> Option<App> {
     std::fs::write(web.join("assets/app.js"), "console.log(1);\n").unwrap();
     // Incompressible bytes: the Snap Store's review wants snaps of at least 16 KiB.
     let mut x = 0x9E37_79B9u32;
-    let noise: Vec<u8> = (0..40_000).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; x as u8 }).collect();
+    let noise: Vec<u8> = (0..40_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect();
     std::fs::write(web.join("assets/noise.bin"), noise).unwrap();
     std::fs::write(dir.join("my-app.1"), ".TH MY-APP 1\n.SH NAME\nmy-app \\- says hello\n.SH SYNOPSIS\n.B my-app\n[\\fIargs\\fR]\n").unwrap();
     Some(
@@ -311,7 +327,13 @@ fn snap_passes_review_tools() {
     for want in ["squashfs-root/meta/snap.yaml", "squashfs-root/meta/gui/icon.png", "squashfs-root/meta/gui/packagerhello.desktop", "squashfs-root/my-app", "squashfs-root/web/index.html"] {
         assert!(listing.contains(want), "missing {want}");
     }
-    let review = if have("review-tools.snap-review") { Some("review-tools.snap-review") } else if have("snap-review") { Some("snap-review") } else { None };
+    let review = if have("review-tools.snap-review") {
+        Some("review-tools.snap-review")
+    } else if have("snap-review") {
+        Some("snap-review")
+    } else {
+        None
+    };
     if let Some(tool) = review {
         // review-tools (a strict snap) can only read files under $HOME.
         let home = PathBuf::from(std::env::var("HOME").unwrap()).join(format!("packager-review-{}.snap", std::process::id()));

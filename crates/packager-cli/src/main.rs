@@ -3,14 +3,14 @@
 mod codesign;
 mod config;
 mod distribute;
-mod windows;
 mod toml;
+mod windows;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use packager::format::{bom, cpio, macho, udif, xar};
-use packager::sign::apple::{verify_macho, CS_ADHOC, CS_RUNTIME};
+use packager::sign::apple::{CS_ADHOC, CS_RUNTIME, verify_macho};
 use packager::sign::bundle::verify_bundle;
 
 const USAGE_TEMPLATE: &str = "\
@@ -169,7 +169,9 @@ fn build(args: &[String]) -> Result<(), String> {
         any = true;
     }
     if !any {
-        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msixbundle] / [package.msi] / [package.deb] / [package.snap], or pass --only".into());
+        return Err(
+            "nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msixbundle] / [package.msi] / [package.deb] / [package.snap], or pass --only".into()
+        );
     }
     if let Some(apple) = cfg.apple {
         b = b.sign(apple);
@@ -185,7 +187,13 @@ fn build(args: &[String]) -> Result<(), String> {
     }
     let out = b.run().map_err(|e| e.to_string())?;
     for p in out.packages() {
-        let tag = if p.notarized() { "notarized" } else if p.signed() { "signed" } else { "unsigned" };
+        let tag = if p.notarized() {
+            "notarized"
+        } else if p.signed() {
+            "signed"
+        } else {
+            "unsigned"
+        };
         println!("{:<4} {:<16} {:>10}  {:<9}  {}  {}", p.kind(), p.arch(), p.size(), tag, p.sha256_hex(), p.path().display());
     }
     Ok(())
@@ -307,15 +315,13 @@ fn verify(args: &[String]) -> Result<(), String> {
             }
             println!("{}: valid bundle, {sig}; packages: {}", path.display(), parts.join(", "));
         }
-        "msix" | "appx" => {
-            match packager::format::appx::verify(&data).map_err(e)? {
-                None => println!("{}: valid package, every file matches the block map; not signed", path.display()),
-                Some(v) => {
-                    let ts = v.cms.timestamp.map(|t| format!(", timestamped {t}")).unwrap_or_default();
-                    println!("{}: valid package, block map and signature digests match ({}{ts})", path.display(), v.cms.signer.common_name().unwrap_or("?"));
-                }
+        "msix" | "appx" => match packager::format::appx::verify(&data).map_err(e)? {
+            None => println!("{}: valid package, every file matches the block map; not signed", path.display()),
+            Some(v) => {
+                let ts = v.cms.timestamp.map(|t| format!(", timestamped {t}")).unwrap_or_default();
+                println!("{}: valid package, block map and signature digests match ({}{ts})", path.display(), v.cms.signer.common_name().unwrap_or("?"));
             }
-        }
+        },
         "deb" => {
             let info = packager::package::deb::read(&data).map_err(e)?;
             let files = info.files.iter().filter(|f| matches!(f.kind, cpio::NodeKind::File(_))).count();

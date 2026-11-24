@@ -22,10 +22,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// WinVerifyTrust's verdict, through PowerShell.
 fn authenticode_status(path: &Path) -> String {
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("(Get-AuthenticodeSignature -LiteralPath '{}').Status", path.display())])
-        .output()
-        .expect("powershell");
+    let out = Command::new("powershell").args(["-NoProfile", "-Command", &format!("(Get-AuthenticodeSignature -LiteralPath '{}').Status", path.display())]).output().expect("powershell");
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -67,7 +64,10 @@ fn authenticode_on_a_real_executable() {
 
     let status = authenticode_status(&exe);
     assert!(status != "HashMismatch" && status != "NotSigned" && status != "NotSupportedFileFormat", "WinVerifyTrust: {status}");
-    let out = Command::new("powershell").args(["-NoProfile", "-Command", &format!("$v=(Get-Item -LiteralPath '{}').VersionInfo; \"$($v.ProductName)|$($v.CompanyName)|$($v.FileVersion)\"", exe.display())]).output().unwrap();
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("$v=(Get-Item -LiteralPath '{}').VersionInfo; \"$($v.ProductName)|$($v.CompanyName)|$($v.FileVersion)\"", exe.display())])
+        .output()
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "Oracle App|Example Ltd|2.3.4");
     // Still a working executable: the test harness lists its tests.
     let run = Command::new(&exe).arg("--list").output().unwrap();
@@ -174,7 +174,7 @@ fn with_msi_db(path: &Path, script: &str) -> String {
 
 #[test]
 fn msi_database_opens_in_windows_installer() {
-    use packager::format::msi::{col, Database, Summary, Table, Value};
+    use packager::format::msi::{Database, Summary, Table, Value, col};
     let dir = scratch("msidb");
     let mut prop = Table::new("Property", vec![col("Property", "*s72"), col("Value", "l0")]);
     prop.row(vec!["ProductName".into(), "Café Oracle".into()]).row(vec!["ALLUSERS".into(), "1".into()]);
@@ -185,7 +185,16 @@ fn msi_database_opens_in_windows_installer() {
     let db = Database {
         tables: vec![prop, file, icon],
         streams: vec![],
-        summary: Summary { subject: "Café Oracle".into(), author: "Example Ltd".into(), template: "x64;1033".into(), revision: "{11111111-2222-3333-4444-555555555555}".into(), page_count: 500, word_count: 2, security: 2, ..Default::default() },
+        summary: Summary {
+            subject: "Café Oracle".into(),
+            author: "Example Ltd".into(),
+            template: "x64;1033".into(),
+            revision: "{11111111-2222-3333-4444-555555555555}".into(),
+            page_count: 500,
+            word_count: 2,
+            security: 2,
+            ..Default::default()
+        },
     };
     let path = dir.join("t.msi");
     std::fs::write(&path, db.write(&[]).unwrap()).unwrap();

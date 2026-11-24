@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::crypto::ec::{der_to_raw, Curve, EcPrivateKey};
+use crate::crypto::ec::{Curve, EcPrivateKey, der_to_raw};
 use crate::crypto::hex;
 use crate::crypto::hmac::HashAlg;
 use crate::crypto::keys::{PrivateKey, pem_decode};
@@ -290,11 +290,7 @@ impl Notarize {
     pub fn preflight(path: &Path) -> Result<()> {
         let a = crate::sign::assess::assess(path, None)?;
         let problems: Vec<String> = a.failures().filter(|c| c.name != "notarized").map(|c| format!("{}: {}", c.name, c.detail)).collect();
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::invalid("notarize", path.display().to_string(), format!("Apple would reject it:\n  {}", problems.join("\n  "))))
-        }
+        if problems.is_empty() { Ok(()) } else { Err(Error::invalid("notarize", path.display().to_string(), format!("Apple would reject it:\n  {}", problems.join("\n  ")))) }
     }
 
     /// Notarizes and (optionally) staples an `.app`, `.dmg` or `.pkg`. If Apple already has a

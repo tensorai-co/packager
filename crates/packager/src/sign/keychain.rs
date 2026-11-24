@@ -245,11 +245,7 @@ impl KeychainSigner {
                 };
                 Ok(KeychainSigner { chain, key })
             }
-            many => Err(Error::Other(format!(
-                "{selector}: ambiguous ({} identities match: {})",
-                many.len(),
-                many.iter().map(|(_, c)| c.common_name().unwrap_or("?")).collect::<Vec<_>>().join(", ")
-            ))),
+            many => Err(Error::Other(format!("{selector}: ambiguous ({} identities match: {})", many.len(), many.iter().map(|(_, c)| c.common_name().unwrap_or("?")).collect::<Vec<_>>().join(", ")))),
         }
     }
 }

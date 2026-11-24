@@ -9,15 +9,15 @@
 
 use std::path::Path;
 
+use crate::Result;
 use crate::crypto::der;
 use crate::crypto::x509::Certificate;
 use crate::error::IoContext;
 use crate::format::plist::Value;
-use crate::sign::apple::{verify_macho, CS_ADHOC, CS_RUNTIME};
-use crate::sign::requirement::{apple_oids, APPLE_ROOT_SHA1};
+use crate::sign::apple::{CS_ADHOC, CS_RUNTIME, verify_macho};
+use crate::sign::requirement::{APPLE_ROOT_SHA1, apple_oids};
 use crate::staple::{self, Kind, Lookup};
 use crate::transport::Transport;
-use crate::Result;
 
 /// Leaf: Developer ID Installer.
 pub const DEVELOPER_ID_INSTALLER_LEAF: &str = "1.2.840.113635.100.6.1.14";

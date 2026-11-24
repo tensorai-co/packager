@@ -3,13 +3,13 @@
 
 use std::path::PathBuf;
 
-use crate::app::App;
-use crate::error::IoContext;
-use crate::package::{AppBundle, Context, Package, PackageBuilder, PackageKind};
-use crate::notary::Notarize;
-use crate::sign::{Apple, AppleIdentity, Authenticode};
 use crate::Error;
 use crate::Result;
+use crate::app::App;
+use crate::error::IoContext;
+use crate::notary::Notarize;
+use crate::package::{AppBundle, Context, Package, PackageBuilder, PackageKind};
+use crate::sign::{Apple, AppleIdentity, Authenticode};
 
 /// A platform's signing configuration, for [`Builder::sign`].
 pub trait Signing {

@@ -3,9 +3,9 @@
 
 use std::path::Path;
 
-use crate::compress::{deflate, Level};
+use crate::compress::{Level, deflate};
 use crate::crypto::crc::crc32;
-use crate::util::{slash_path, walk, EntryKind};
+use crate::util::{EntryKind, slash_path, walk};
 use crate::{Error, Result};
 
 /// What an entry is.

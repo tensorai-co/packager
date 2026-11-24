@@ -79,14 +79,7 @@ fn app_dmg_pkg_pass_native_checks() {
         .url_scheme("oracle")
         .file_type("txt", "Text");
     let out = dir.join("dist");
-    let built = packager::build(&app)
-        .app_bundle(AppBundle::new().framework(&lib))
-        .package(AppBundle::new().framework(&lib))
-        .package(Dmg::new())
-        .package(Pkg::new())
-        .out_dir(&out)
-        .run()
-        .unwrap();
+    let built = packager::build(&app).app_bundle(AppBundle::new().framework(&lib)).package(AppBundle::new().framework(&lib)).package(Dmg::new()).package(Pkg::new()).out_dir(&out).run().unwrap();
     let path_of = |k: packager::PackageKind| built.packages().iter().find(|p| p.kind() == k).unwrap().path().to_path_buf();
     let app_path = path_of(packager::PackageKind::App);
     let dmg = path_of(packager::PackageKind::Dmg);
@@ -145,12 +138,7 @@ fn hardened_runtime_with_entitlements() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>"#;
     let app = App::new("Ent", "com.example.ent", "1.0.0").binary(Arch::MacosArm64, &arm);
-    let out = packager::build(&app)
-        .package(AppBundle::new())
-        .sign(packager::sign::Apple::ad_hoc().hardened_runtime().entitlements_xml(ent))
-        .out_dir(dir.join("dist"))
-        .run()
-        .unwrap();
+    let out = packager::build(&app).package(AppBundle::new()).sign(packager::sign::Apple::ad_hoc().hardened_runtime().entitlements_xml(ent)).out_dir(dir.join("dist")).run().unwrap();
     let p = out.packages()[0].path();
     run(Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(p));
     let info = run(Command::new("codesign").args(["-d", "--entitlements", "-", "--verbose=4"]).arg(p));

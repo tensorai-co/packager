@@ -73,13 +73,7 @@ pub fn sign_detached(signer: &dyn Signer, content: &[u8], digest_alg: HashAlg, e
     }
     let signer_info = der::sequence(&si_parts.concat());
     let certs: Vec<u8> = chain.iter().flat_map(|c| c.der.clone()).collect();
-    let signed_data = der::seq(&[
-        &der::integer(1),
-        &der::set_of(vec![algorithm(digest_alg)]),
-        &der::seq(&[&der::oid(oids::PKCS7_DATA)]),
-        &der::context(0, &certs),
-        &der::set_of(vec![signer_info]),
-    ]);
+    let signed_data = der::seq(&[&der::integer(1), &der::set_of(vec![algorithm(digest_alg)]), &der::seq(&[&der::oid(oids::PKCS7_DATA)]), &der::context(0, &certs), &der::set_of(vec![signer_info])]);
     Ok(der::seq(&[&der::oid(oids::PKCS7_SIGNED_DATA), &der::context(0, &signed_data)]))
 }
 
