@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use packager::package::{AppBundle, Dmg, Msix, Pkg};
+use packager::package::{AppBundle, Dmg, Msi, Msix, Pkg};
 use packager::{App, Arch};
 
 use crate::toml::{self, Toml};
@@ -14,6 +14,7 @@ pub struct Config {
     pub dmg: Option<Dmg>,
     pub pkg: Option<Pkg>,
     pub msix: Option<Msix>,
+    pub msi: Option<Msi>,
     pub app_package: bool,
     pub apple: Option<packager::sign::Apple>,
     pub authenticode: Option<packager::sign::Authenticode>,
@@ -218,7 +219,31 @@ pub fn load(path: &Path) -> Result<Config, String> {
             Some(x)
         }
     };
-    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none() && msix.is_none());
+    let msi = match section("msi") {
+        None => None,
+        Some(m) => {
+            check_keys(m, &["scope", "upgrade_code", "shortcut", "archs"], "package.msi")?;
+            let mut x = Msi::new();
+            match s(m, "scope", "package.msi")? {
+                None | Some("per-machine") => {}
+                Some("per-user") => x = x.per_user(),
+                Some(o) => return Err(format!("package.msi.scope: `{o}` must be `per-machine` or `per-user`")),
+            }
+            if let Some(v) = s(m, "upgrade_code", "package.msi")? {
+                x = x.upgrade_code(v);
+            }
+            if m.get("shortcut").and_then(Toml::as_bool) == Some(false) {
+                x = x.no_shortcut();
+            }
+            let archs = strings(m, "archs", "package.msi")?;
+            if !archs.is_empty() {
+                let parsed: Result<Vec<Arch>, String> = archs.iter().map(|a| Arch::parse(a).ok_or_else(|| format!("unknown architecture `{a}` in package.msi.archs"))).collect();
+                x = x.archs(parsed?);
+            }
+            Some(x)
+        }
+    };
+    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none() && msix.is_none() && msi.is_none());
 
     let apple = match root.get("sign").and_then(|s| s.get("apple")) {
         None => None,
@@ -318,7 +343,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .transpose()?
         .flatten()
         .unwrap_or_else(|| base.join("target/dist"));
-    Ok(Config { app, app_bundle, dmg, pkg, msix, app_package, apple, authenticode, notarize, out_dir })
+    Ok(Config { app, app_bundle, dmg, pkg, msix, msi, app_package, apple, authenticode, notarize, out_dir })
 }
 
 fn toml_to_plist(v: &Toml) -> Option<packager::format::plist::Value> {

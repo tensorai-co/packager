@@ -37,6 +37,11 @@ applications_position = [400, 180]
 install_location = "/Applications"
 # postinstall = "scripts/postinstall"
 
+[package.msi]                     # one per Windows binary; UpgradeCode etc. are derived
+# scope = "per-user"               # %LocalAppData%\Programs, no UAC prompt (default per-machine)
+# upgrade_code = "{…}"             # only when migrating from another installer
+# shortcut = false                 # no Start menu shortcut
+
 [package.msix]                    # one per Windows binary; needs [sign.windows] to install
 # min_version = "10.0.17763.0"
 # background = "transparent"

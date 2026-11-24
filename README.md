@@ -9,10 +9,10 @@ certificate, installer signatures included), notarized and stapled without `code
 `hdiutil`, `pkgbuild`, `productbuild`, `productsign`, `notarytool`, `stapler`, `spctl`, `iconutil`
 or `sips`.
 
-**Windows (in progress).** `.msix` packages are built and signed, and `.exe` files get their icon,
-version information and manifest (what `rcedit` does) and an Authenticode signature, without
-`makeappx`, `signtool` or `rcedit`. `.msixbundle` and `.msi` come next; Debian/Ubuntu after that
-(see `proposed_packager_rs.md`).
+**Windows.** `.msi` and `.msix` packages are built and signed, and `.exe` files get their icon,
+version information and manifest (what `rcedit` does) and an Authenticode signature, without WiX,
+`makeappx`, `signtool` or `rcedit`. `.msixbundle` comes next; Debian/Ubuntu after that (see
+`proposed_packager_rs.md`).
 
 | Package | What's written | Checked against (CI oracles, never runtime deps) |
 | --- | --- | --- |
@@ -21,6 +21,7 @@ version information and manifest (what `rcedit` does) and an Authenticode signat
 | `.pkg` | Flat product archive: XAR with `Distribution`, `PackageInfo` (not relocatable), `Bom`, gzip'd cpio payload, optional scripts; installer signature (RSA + CMS in the TOC) with an installer identity | `installer -pkginfo`, `pkgutil --expand-full`, `pkgutil --check-signature`, `lsbom`, payload diff |
 
 | `.exe` / `.dll` | Icon group (`.ico` from one PNG), `VS_VERSIONINFO`, manifest, in a rebuilt `.rsrc`; Authenticode (SHA-256, RFC 3161 timestamp), PE checksum | `Get-AuthenticodeSignature`, `signtool verify`, `signtool`-signed files read back, running it |
+| `.msi` | Compound File (mini stream, DIFAT, red-black directory), string pool and column-major tables, `\x05SummaryInformation`, MSZIP cabinet in a stream; one component per file, Start menu shortcut, URL schemes and file types, ARP icon, major upgrade with downgrade block; per-machine or per-user; Authenticode in `\x05DigitalSignature` | Windows Installer's COM API (SQL queries, summary info), `Get-AuthenticodeSignature`, `msiexec` install / upgrade / downgrade / uninstall |
 | `.msix` | Signed exe, app files, logos from the icon, `AppxManifest.xml` (full trust, URL schemes, file types; `Publisher` from the certificate), `AppxBlockMap.xml`, `[Content_Types].xml`, `AppxSignature.p7x`, ZIP64 end records like `makeappx` | `Get-AuthenticodeSignature`, `makeappx unpack`, `makeappx`+`signtool` packages read back |
 
 Output is deterministic: same input, byte-identical packages (`SOURCE_DATE_EPOCH`, default
@@ -101,12 +102,13 @@ packager identities                  # like `security find-identity -v -p codesi
 ## Windows
 
 ```rust
-use packager::package::Msix;
+use packager::package::{Msi, Msix};
 use packager::sign::{Authenticode, KeySigner};
 
 let signer = KeySigner::pkcs12("codesign.pfx", "password")?.into_arc();
 packager::build(&app)
     .package(Msix::new().execution_alias("my-app"))  // one .msix per Windows binary; `my-app` on PATH
+    .package(Msi::new())                             // one .msi per Windows binary; codes derived
     .sign(Authenticode::new(signer).timestamp("http://timestamp.digicert.com"))
     .run()?;
 ```
@@ -116,6 +118,16 @@ packager rcedit my-app.exe --icon icon.png --version 1.4.0 --set CompanyName="Ex
 packager sign my-app.exe -s p12:codesign.pfx --timestamp http://timestamp.digicert.com
 packager verify "dist/My App-1.4.0-x64.msix"   # block map, digests, signature
 ```
+
+MSI codes are derived, never hand-managed: the UpgradeCode from the identifier (stable forever),
+the ProductCode from identifier, version and architecture (new every release, so each one is a
+clean major upgrade), the PackageCode from the contents, and component GUIDs from each file's
+install path. Versions are checked up front (at most 255.255.65535; pre-releases rejected). Checked
+on Windows Server 2025: Windows Installer reads the tables and summary through its own API, the
+signature is valid, and `msiexec` installs (files, shortcut, URL scheme, file type, ARP entry and
+icon), upgrades in place, refuses a downgrade with "A newer version … is already installed",
+installs per-user into `%LocalAppData%\Programs` without elevation, and uninstalls cleanly.
+Not done yet: ICE validation (`_Validation` table), MSI dialogs, and `MsiDigitalSignatureEx`.
 
 What it takes to match Windows: the MSIX signature's `AXCD` digest always covers ZIP64 end
 records, and Windows' package reader wants `makeappx`'s entry layout (MS-DOS "made by", ZIP64
@@ -216,7 +228,8 @@ command lines with `codesign`; `oracle_crypto.rs` checks keys, certificates, PKC
 requirements against `openssl` and `csreq`; `oracle_notary.rs` checks stapled disk images,
 installer signatures and submission ZIPs with `codesign`, `hdiutil`, `pkgutil`, `installer` and
 `ditto`. `oracle_windows.rs` (on Windows) checks Authenticode and MSIX with
-`Get-AuthenticodeSignature` and `makeappx`; its opt-in install test (`cargo test -- --ignored
+`Get-AuthenticodeSignature`, `makeappx` and Windows Installer's COM API; opt-in tests run
+`msiexec` (`cargo test -- --ignored msi_installs`, elevated) and (`cargo test -- --ignored
 msix_installs`, with `PACKAGER_MSIX_CERT`/`PACKAGER_MSIX_KEY` naming a sideload-trusted
 certificate) installs, runs, upgrades and removes a package. The notary tests' network test
 (`cargo test -- --ignored network`) staples a notarized package on

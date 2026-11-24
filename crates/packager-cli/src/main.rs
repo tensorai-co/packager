@@ -125,8 +125,8 @@ fn build(args: &[String]) -> Result<(), String> {
     let only: Option<Vec<&str>> = a.value("only").map(|o| o.split(',').map(str::trim).collect());
     if let Some(o) = &only {
         for k in o {
-            if !["app", "dmg", "pkg", "msix"].contains(k) {
-                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix)"));
+            if !["app", "dmg", "pkg", "msix", "msi"].contains(k) {
+                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix, msi)"));
             }
         }
     }
@@ -152,8 +152,12 @@ fn build(args: &[String]) -> Result<(), String> {
         b = b.package(cfg.msix.clone().unwrap_or_default());
         any = true;
     }
+    if want("msi", cfg.msi.is_some()) {
+        b = b.package(cfg.msi.clone().unwrap_or_default());
+        any = true;
+    }
     if !any {
-        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix], or pass --only".into());
+        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msi], or pass --only".into());
     }
     if let Some(apple) = cfg.apple {
         b = b.sign(apple);
@@ -260,6 +264,20 @@ fn verify(args: &[String]) -> Result<(), String> {
             let sig = distribute::describe_pkg_signature(&data)?;
             let ticket = if packager::staple::stapled_ticket(path).ok().flatten().is_some() { "; ticket stapled" } else { "" };
             println!("{}: valid XAR archive ({} files, checksums match), Bom lists {paths} paths, payload readable; {sig}{ticket}", path.display(), files.len());
+        }
+        "msi" => {
+            let db = packager::format::msi::read(&data).map_err(e)?;
+            let rows: usize = db.tables.iter().map(|t| t.rows.len()).sum();
+            let files = db.table("File").map(|t| t.rows.len()).unwrap_or(0);
+            let sig = match packager::sign::msi::verify_msi(&data).map_err(e)? {
+                None => "not signed".to_string(),
+                Some(v) => format!("signature valid ({}{})", v.cms.signer.common_name().unwrap_or("?"), v.cms.timestamp.map(|t| format!(", timestamped {t}")).unwrap_or_default()),
+            };
+            let cab_ok = match db.streams.iter().find(|s| s.0.ends_with(".cab")) {
+                Some((_, c)) => format!("{} files in the cabinet", packager::format::cab::read(c).map_err(e)?.len()),
+                None => "no embedded cabinet".into(),
+            };
+            println!("{}: valid installer database ({} tables, {rows} rows, {files} files; {cab_ok}); {sig}", path.display(), db.tables.len());
         }
         "msix" | "appx" => {
             match packager::format::appx::verify(&data).map_err(e)? {

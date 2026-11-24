@@ -13,6 +13,7 @@ pub mod disk_image;
 pub mod installer;
 #[cfg(target_os = "macos")]
 pub mod keychain;
+pub mod msi;
 pub mod requirement;
 pub mod signer;
 pub mod timestamp;

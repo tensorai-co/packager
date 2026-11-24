@@ -2,6 +2,7 @@
 
 pub mod app_bundle;
 pub mod dmg;
+pub mod msi;
 pub mod msix;
 pub mod pkg;
 pub mod windows;
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub use app_bundle::AppBundle;
 pub use dmg::Dmg;
+pub use msi::Msi;
 pub use msix::Msix;
 pub use pkg::Pkg;
 
@@ -31,6 +33,8 @@ pub enum PackageKind {
     Pkg,
     /// A Windows MSIX package.
     Msix,
+    /// A Windows Installer package.
+    Msi,
 }
 
 impl fmt::Display for PackageKind {
@@ -40,6 +44,7 @@ impl fmt::Display for PackageKind {
             PackageKind::Dmg => "dmg",
             PackageKind::Pkg => "pkg",
             PackageKind::Msix => "msix",
+            PackageKind::Msi => "msi",
         })
     }
 }
