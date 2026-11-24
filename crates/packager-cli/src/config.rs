@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use packager::package::{AppBundle, Dmg, Msi, Msix, Pkg};
+use packager::package::{AppBundle, Dmg, Msi, Msix, MsixBundle, Pkg};
 use packager::{App, Arch};
 
 use crate::toml::{self, Toml};
@@ -15,6 +15,7 @@ pub struct Config {
     pub pkg: Option<Pkg>,
     pub msix: Option<Msix>,
     pub msi: Option<Msi>,
+    pub msixbundle: Option<MsixBundle>,
     pub app_package: bool,
     pub apple: Option<packager::sign::Apple>,
     pub authenticode: Option<packager::sign::Authenticode>,
@@ -222,7 +223,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
     let msi = match section("msi") {
         None => None,
         Some(m) => {
-            check_keys(m, &["scope", "upgrade_code", "shortcut", "archs"], "package.msi")?;
+            check_keys(m, &["scope", "upgrade_code", "shortcut", "archs", "ui"], "package.msi")?;
             let mut x = Msi::new();
             match s(m, "scope", "package.msi")? {
                 None | Some("per-machine") => {}
@@ -235,6 +236,11 @@ pub fn load(path: &Path) -> Result<Config, String> {
             if m.get("shortcut").and_then(Toml::as_bool) == Some(false) {
                 x = x.no_shortcut();
             }
+            match s(m, "ui", "package.msi")? {
+                None | Some("basic") => {}
+                Some("wizard") => x = x.wizard(),
+                Some(o) => return Err(format!("package.msi.ui: `{o}` must be `basic` or `wizard`")),
+            }
             let archs = strings(m, "archs", "package.msi")?;
             if !archs.is_empty() {
                 let parsed: Result<Vec<Arch>, String> = archs.iter().map(|a| Arch::parse(a).ok_or_else(|| format!("unknown architecture `{a}` in package.msi.archs"))).collect();
@@ -243,7 +249,22 @@ pub fn load(path: &Path) -> Result<Config, String> {
             Some(x)
         }
     };
-    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none() && msix.is_none() && msi.is_none());
+    let msixbundle = match section("msixbundle") {
+        None => None,
+        Some(b) => {
+            check_keys(b, &["archs"], "package.msixbundle")?;
+            let archs = strings(b, "archs", "package.msixbundle")?;
+            let parsed: Result<Vec<Arch>, String> = archs.iter().map(|a| Arch::parse(a).ok_or_else(|| format!("unknown architecture `{a}` in package.msixbundle.archs"))).collect();
+            let parsed = parsed?;
+            let mut x = if parsed.is_empty() { MsixBundle::all() } else { MsixBundle::new(parsed) };
+            // The packages inside take [package.msix]'s settings.
+            if let Some(m) = &msix {
+                x = x.packages(m.clone());
+            }
+            Some(x)
+        }
+    };
+    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none() && msix.is_none() && msi.is_none() && msixbundle.is_none());
 
     let apple = match root.get("sign").and_then(|s| s.get("apple")) {
         None => None,
@@ -343,7 +364,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .transpose()?
         .flatten()
         .unwrap_or_else(|| base.join("target/dist"));
-    Ok(Config { app, app_bundle, dmg, pkg, msix, msi, app_package, apple, authenticode, notarize, out_dir })
+    Ok(Config { app, app_bundle, dmg, pkg, msix, msi, msixbundle, app_package, apple, authenticode, notarize, out_dir })
 }
 
 fn toml_to_plist(v: &Toml) -> Option<packager::format::plist::Value> {

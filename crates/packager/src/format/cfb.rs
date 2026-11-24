@@ -241,6 +241,14 @@ pub struct ReadEntry {
     pub data: Vec<u8>,
     /// Children (storages).
     pub children: Vec<ReadEntry>,
+    /// State bits, as stored.
+    pub state_bits: [u8; 4],
+    /// Creation time (FILETIME), as stored.
+    pub created: [u8; 8],
+    /// Modification time (FILETIME), as stored.
+    pub modified: [u8; 8],
+    /// The size field's low 32 bits, as stored.
+    pub size_low: [u8; 4],
 }
 
 /// Reads a compound file: the root storage with every stream and storage below it.
@@ -331,7 +339,19 @@ pub fn read(data: &[u8]) -> Result<ReadEntry> {
         clsid.copy_from_slice(&e[80..96]);
         let start = u32::from_le_bytes(e[116..120].try_into().unwrap_or_default());
         let size = u64::from_le_bytes(e[120..128].try_into().unwrap_or_default()) as usize;
-        let mut out = ReadEntry { name, raw_name, is_storage: kind == 1 || kind == 5, clsid, data: Vec::new(), children: Vec::new() };
+        let field = |a: usize, b: usize| e[a..b].to_vec();
+        let mut out = ReadEntry {
+            name,
+            raw_name,
+            is_storage: kind == 1 || kind == 5,
+            clsid,
+            data: Vec::new(),
+            children: Vec::new(),
+            state_bits: field(96, 100).try_into().unwrap_or_default(),
+            created: field(100, 108).try_into().unwrap_or_default(),
+            modified: field(108, 116).try_into().unwrap_or_default(),
+            size_low: field(120, 124).try_into().unwrap_or_default(),
+        };
         if kind == 2 {
             out.data = stream_data(start, size)?;
         } else {

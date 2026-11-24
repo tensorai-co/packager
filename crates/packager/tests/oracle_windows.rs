@@ -270,3 +270,49 @@ fn msi_installs_upgrades_blocks_downgrade_and_uninstalls() {
     assert!(!Path::new(target).exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// WiX 3's `smoke.exe` (Microsoft's ICE rules in `darice.cub`), if installed.
+fn smoke() -> Option<PathBuf> {
+    let p = PathBuf::from(r"C:\Program Files (x86)\WiX Toolset v3.14\bin\smoke.exe");
+    p.is_file().then_some(p)
+}
+
+#[test]
+fn msi_passes_ice_validation() {
+    let Some(smoke) = smoke() else {
+        eprintln!("skipped: WiX 3.14 (smoke.exe) isn't installed");
+        return;
+    };
+    let dir = scratch("ice");
+    let exe = real_exe(&dir);
+    for (name, msi) in [("machine", packager::package::Msi::new()), ("user", packager::package::Msi::new().per_user()), ("wizard", packager::package::Msi::new().wizard())] {
+        let out = packager::build(&msi_app(&dir, &exe, "1.0.0")).package(msi).out_dir(dir.join(name)).run().unwrap();
+        let r = Command::new(&smoke).arg("-nologo").arg(out.packages()[0].path()).output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&r.stdout), String::from_utf8_lossy(&r.stderr));
+        let findings: Vec<&str> = text.lines().filter(|l| l.contains(" error ") || l.contains(" warning ")).collect();
+        assert!(findings.is_empty(), "{name}: ICE findings:\n{}", findings.join("\n"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn msix_bundle_is_accepted_by_windows() {
+    let dir = scratch("bundle");
+    let exe = real_exe(&dir);
+    let app = packager::App::new("Oracle Bundle", "com.example.oraclebundle", "1.2.3").binary(packager::Arch::WindowsX64, &exe).icon(icon(&dir));
+    let signer = KeySigner::self_signed("Packager Bundle Oracle", None).unwrap().into_arc();
+    let out = packager::build(&app).package(packager::package::MsixBundle::all()).sign(Authenticode::new(signer)).out_dir(dir.join("dist")).run().unwrap();
+    let bundle = out.packages()[0].path().to_path_buf();
+    let data = std::fs::read(&bundle).unwrap();
+    assert!(packager::format::appx::verify(&data).unwrap().is_some());
+    let inner = packager::format::appx::bundle_packages(&data).unwrap();
+    assert_eq!(inner.len(), 1);
+    assert!(packager::format::appx::verify(&inner[0].1).unwrap().is_some());
+    let status = authenticode_status(&bundle);
+    assert!(status != "HashMismatch" && status != "NotSigned" && status != "NotSupportedFileFormat", "WinVerifyTrust: {status}");
+    if let Some(makeappx) = sdk_tool("makeappx.exe") {
+        let x = Command::new(makeappx).args(["unbundle", "/o", "/p"]).arg(&bundle).arg("/d").arg(dir.join("unbundled")).output().unwrap();
+        assert!(x.status.success(), "makeappx unbundle: {}", String::from_utf8_lossy(&x.stdout));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

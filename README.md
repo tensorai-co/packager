@@ -9,9 +9,9 @@ certificate, installer signatures included), notarized and stapled without `code
 `hdiutil`, `pkgbuild`, `productbuild`, `productsign`, `notarytool`, `stapler`, `spctl`, `iconutil`
 or `sips`.
 
-**Windows.** `.msi` and `.msix` packages are built and signed, and `.exe` files get their icon,
-version information and manifest (what `rcedit` does) and an Authenticode signature, without WiX,
-`makeappx`, `signtool` or `rcedit`. `.msixbundle` comes next; Debian/Ubuntu after that (see
+**Windows.** `.msi`, `.msix` and `.msixbundle` packages are built and signed, and `.exe` files get
+their icon, version information and manifest (what `rcedit` does) and an Authenticode signature,
+without WiX, `makeappx`, `signtool` or `rcedit`. Debian/Ubuntu come next (see
 `proposed_packager_rs.md`).
 
 | Package | What's written | Checked against (CI oracles, never runtime deps) |
@@ -21,7 +21,8 @@ version information and manifest (what `rcedit` does) and an Authenticode signat
 | `.pkg` | Flat product archive: XAR with `Distribution`, `PackageInfo` (not relocatable), `Bom`, gzip'd cpio payload, optional scripts; installer signature (RSA + CMS in the TOC) with an installer identity | `installer -pkginfo`, `pkgutil --expand-full`, `pkgutil --check-signature`, `lsbom`, payload diff |
 
 | `.exe` / `.dll` | Icon group (`.ico` from one PNG), `VS_VERSIONINFO`, manifest, in a rebuilt `.rsrc`; Authenticode (SHA-256, RFC 3161 timestamp), PE checksum | `Get-AuthenticodeSignature`, `signtool verify`, `signtool`-signed files read back, running it |
-| `.msi` | Compound File (mini stream, DIFAT, red-black directory), string pool and column-major tables, `\x05SummaryInformation`, MSZIP cabinet in a stream; one component per file, Start menu shortcut, URL schemes and file types, ARP icon, major upgrade with downgrade block; per-machine or per-user; Authenticode in `\x05DigitalSignature` | Windows Installer's COM API (SQL queries, summary info), `Get-AuthenticodeSignature`, `msiexec` install / upgrade / downgrade / uninstall |
+| `.msi` | Compound File (mini stream, DIFAT, red-black directory), string pool and column-major tables, `\x05SummaryInformation`, MSZIP cabinet in a stream; one component per file, Start menu shortcut (own HKCU-keyed component), URL schemes and file types, ARP icon, major upgrade with downgrade block; per-machine or per-user; optional install wizard; `_Validation` table; cabinets split at 1 GiB; Authenticode in `\x05DigitalSignature` with `\x05MsiDigitalSignatureEx` | ICE validation (`darice.cub` via WiX `smoke`: 0 errors, 0 warnings), Windows Installer's COM API, `Get-AuthenticodeSignature`, `signtool`-signed MSIs read back, `msiexec` install / upgrade / downgrade / uninstall |
+| `.msixbundle` | Signed per-architecture `.msix` packages stored as is, `AppxBundleManifest.xml` (offsets, device family), block map, bundle signature | `Get-AuthenticodeSignature`, `makeappx unbundle`, `Add-AppxPackage` |
 | `.msix` | Signed exe, app files, logos from the icon, `AppxManifest.xml` (full trust, URL schemes, file types; `Publisher` from the certificate), `AppxBlockMap.xml`, `[Content_Types].xml`, `AppxSignature.p7x`, ZIP64 end records like `makeappx` | `Get-AuthenticodeSignature`, `makeappx unpack`, `makeappx`+`signtool` packages read back |
 
 Output is deterministic: same input, byte-identical packages (`SOURCE_DATE_EPOCH`, default
@@ -102,13 +103,14 @@ packager identities                  # like `security find-identity -v -p codesi
 ## Windows
 
 ```rust
-use packager::package::{Msi, Msix};
+use packager::package::{Msi, Msix, MsixBundle};
 use packager::sign::{Authenticode, KeySigner};
 
 let signer = KeySigner::pkcs12("codesign.pfx", "password")?.into_arc();
 packager::build(&app)
     .package(Msix::new().execution_alias("my-app"))  // one .msix per Windows binary; `my-app` on PATH
-    .package(Msi::new())                             // one .msi per Windows binary; codes derived
+    .package(Msi::new().wizard())                    // one .msi per Windows binary; codes derived
+    .package(MsixBundle::all())                      // every architecture in one download
     .sign(Authenticode::new(signer).timestamp("http://timestamp.digicert.com"))
     .run()?;
 ```
@@ -127,7 +129,14 @@ on Windows Server 2025: Windows Installer reads the tables and summary through i
 signature is valid, and `msiexec` installs (files, shortcut, URL scheme, file type, ARP entry and
 icon), upgrades in place, refuses a downgrade with "A newer version … is already installed",
 installs per-user into `%LocalAppData%\Programs` without elevation, and uninstalls cleanly.
-Not done yet: ICE validation (`_Validation` table), MSI dialogs, and `MsiDigitalSignatureEx`.
+Every package carries a `_Validation` table and passes Microsoft's ICE suite with no errors or
+warnings (per-machine, per-user and with the wizard). `ui = "wizard"` adds a minimal wizard
+(Welcome with the install folder, progress, finished, and the error, files-in-use and cancel
+dialogs Windows Installer requires); without it double-clicking shows the basic progress UI.
+Signatures include `MsiDigitalSignatureEx` (the metadata hash) like `signtool`'s, and `signtool`'s
+are verified. Packages over 1 GiB are split across several embedded cabinets; files over 2 GB
+can't be packaged, as `File.FileSize` is 32-bit. The wizard's screens are checked by ICE but
+haven't been clicked through on a desktop session yet.
 
 What it takes to match Windows: the MSIX signature's `AXCD` digest always covers ZIP64 end
 records, and Windows' package reader wants `makeappx`'s entry layout (MS-DOS "made by", ZIP64

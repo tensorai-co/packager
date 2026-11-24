@@ -16,18 +16,25 @@ pub const MSI_SIP_GUID: [u8; 16] = [0xf1, 0x10, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x
 const DIGITAL_SIGNATURE: &str = "\u{5}DigitalSignature";
 const DIGITAL_SIGNATURE_EX: &str = "\u{5}MsiDigitalSignatureEx";
 
-fn is_signature(e: &ReadEntry) -> bool {
-    let n = String::from_utf16_lossy(&e.name);
-    n == DIGITAL_SIGNATURE || n == DIGITAL_SIGNATURE_EX
+fn name_is(e: &ReadEntry, n: &str) -> bool {
+    String::from_utf16_lossy(&e.name) == n
 }
 
-fn hash_into(e: &ReadEntry, root: bool, out: &mut Vec<u8>) {
-    let mut kids: Vec<&ReadEntry> = e.children.iter().filter(|c| !(root && is_signature(c))).collect();
+/// Children in the order both hashes visit them: names compared as stored bytes, the longer
+/// first on a tie.
+fn sorted<'a>(e: &'a ReadEntry, skip: &dyn Fn(&ReadEntry) -> bool) -> Vec<&'a ReadEntry> {
+    let mut kids: Vec<&ReadEntry> = e.children.iter().filter(|c| !skip(c)).collect();
     kids.sort_by(|a, b| {
         let n = a.raw_name.len().min(b.raw_name.len());
         a.raw_name[..n].cmp(&b.raw_name[..n]).then(b.raw_name.len().cmp(&a.raw_name.len()))
     });
-    for k in kids {
+    kids
+}
+
+/// The content hash: every stream's bytes (MsiDigitalSignatureEx included), then each
+/// storage's CLSID after its children.
+fn hash_into(e: &ReadEntry, root: bool, out: &mut Vec<u8>) {
+    for k in sorted(e, &|c| root && name_is(c, DIGITAL_SIGNATURE)) {
         if k.is_storage {
             hash_into(k, false, out);
         } else if !k.data.is_empty() {
@@ -37,11 +44,46 @@ fn hash_into(e: &ReadEntry, root: bool, out: &mut Vec<u8>) {
     out.extend_from_slice(&e.clsid);
 }
 
+/// The metadata pre-hash input (pre-order): names, CLSIDs or sizes, state bits and times.
+fn prehash_into(e: &ReadEntry, root: bool, out: &mut Vec<u8>) {
+    let meta = |x: &ReadEntry, is_root: bool, out: &mut Vec<u8>| {
+        if !is_root {
+            out.extend_from_slice(&x.raw_name[..x.raw_name.len().saturating_sub(2)]);
+        }
+        if x.is_storage {
+            out.extend_from_slice(&x.clsid);
+        } else {
+            out.extend_from_slice(&x.size_low);
+        }
+        out.extend_from_slice(&x.state_bits);
+        if !is_root {
+            out.extend_from_slice(&x.created);
+            out.extend_from_slice(&x.modified);
+        }
+    };
+    meta(e, root, out);
+    for k in sorted(e, &|c| root && (name_is(c, DIGITAL_SIGNATURE) || name_is(c, DIGITAL_SIGNATURE_EX))) {
+        if k.is_storage {
+            prehash_into(k, false, out);
+        } else {
+            meta(k, false, out);
+        }
+    }
+}
+
 /// The Authenticode hash of an installer database.
 pub fn msi_hash(file: &[u8], hash: HashAlg) -> Result<Vec<u8>> {
     let root = cfb::read(file)?;
     let mut buf = Vec::new();
     hash_into(&root, true, &mut buf);
+    Ok(hash.digest(&buf))
+}
+
+/// The `MsiDigitalSignatureEx` value: the hash of the directory metadata.
+pub fn metadata_hash(file: &[u8], hash: HashAlg) -> Result<Vec<u8>> {
+    let root = cfb::read(file)?;
+    let mut buf = Vec::new();
+    prehash_into(&root, true, &mut buf);
     Ok(hash.digest(&buf))
 }
 
@@ -54,18 +96,22 @@ fn indirect_data(hash: HashAlg, digest: &[u8]) -> Vec<u8> {
 
 /// Signs (or re-signs) an `.msi`: the database is rewritten with a `\x05DigitalSignature`
 /// stream (any old signature streams dropped).
+/// Like `signtool`, it also writes `\x05MsiDigitalSignatureEx`, so changes to the directory
+/// metadata (names, timestamps) are caught too.
 pub fn sign_msi(file: &[u8], signer: &dyn Signer, opts: &Options) -> Result<Vec<u8>> {
     let root = cfb::read(file)?;
     if root.children.iter().any(|c| c.is_storage) {
         return Err(Error::invalid("msi", "storages", "packages with embedded storages (transforms, nested databases) can't be re-signed yet"));
     }
-    let digest = msi_hash(file, opts.digest)?;
+    let mut streams: Vec<Stream> = root.children.iter().filter(|c| !name_is(c, DIGITAL_SIGNATURE) && !name_is(c, DIGITAL_SIGNATURE_EX)).map(|c| Stream { name: c.name.clone(), data: c.data.clone() }).collect();
+    // The metadata pre-hash covers the database as written without either signature stream.
+    let bare = cfb::write(&streams, root.clsid)?;
+    streams.push(Stream::new(DIGITAL_SIGNATURE_EX, metadata_hash(&bare, opts.digest)?));
+    let with_ex = cfb::write(&streams, root.clsid)?;
+    let digest = msi_hash(&with_ex, opts.digest)?;
     let p7 = authenticode::signed_data(signer, &indirect_data(opts.digest, &digest), opts)?;
-    let mut streams: Vec<Stream> = root.children.iter().filter(|c| !is_signature(c)).map(|c| Stream { name: c.name.clone(), data: c.data.clone() }).collect();
     streams.push(Stream::new(DIGITAL_SIGNATURE, p7));
-    let mut clsid = [0u8; 16];
-    clsid.copy_from_slice(&root.clsid);
-    cfb::write(&streams, clsid)
+    cfb::write(&streams, root.clsid)
 }
 
 /// A verified MSI signature.
@@ -102,8 +148,10 @@ pub fn verify_msi(file: &[u8]) -> Result<Option<Verified>> {
     let alg = dr.expect(tag::SEQUENCE)?;
     let hash = crate::crypto::keys::hash_for_digest_oid(alg.reader().expect(tag::OID)?.value).ok_or_else(|| bad("unsupported digest"))?;
     let signed = dr.expect(tag::OCTET_STRING)?.value;
-    if root.children.iter().any(|c| String::from_utf16_lossy(&c.name) == DIGITAL_SIGNATURE_EX) {
-        return Err(bad("MsiDigitalSignatureEx (metadata pre-hash) isn't supported yet"));
+    if let Some(ex) = root.children.iter().find(|c| name_is(c, DIGITAL_SIGNATURE_EX))
+        && metadata_hash(file, hash)? != ex.data
+    {
+        return Err(Error::Other("the package's metadata changed after signing (MsiDigitalSignatureEx mismatch)".into()));
     }
     if msi_hash(file, hash)? != signed {
         return Err(Error::Other("the package changed after signing (MSI hash mismatch)".into()));
@@ -129,7 +177,10 @@ mod tests {
         let signed = sign_msi(&unsigned, &signer, &Options::sha256()).unwrap();
         let v = verify_msi(&signed).unwrap().unwrap();
         assert_eq!(v.cms.signer.common_name(), Some("Packager Msi Test"));
-        assert_eq!(msi_hash(&signed, HashAlg::Sha256).unwrap(), msi_hash(&unsigned, HashAlg::Sha256).unwrap());
+        // The metadata pre-hash is stored and covers the database as it was before signing.
+        let root = cfb::read(&signed).unwrap();
+        let ex = root.children.iter().find(|c| name_is(c, DIGITAL_SIGNATURE_EX)).unwrap();
+        assert_eq!(ex.data, metadata_hash(&unsigned, HashAlg::Sha256).unwrap());
         let resigned = sign_msi(&signed, &signer, &Options::sha256()).unwrap();
         assert!(verify_msi(&resigned).unwrap().is_some());
         // Change the cabinet stream: the hash no longer matches.

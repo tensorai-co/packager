@@ -18,6 +18,9 @@ use crate::package::{file_name, Context, Package, PackageBuilder, PackageKind};
 use crate::util::source_date_epoch;
 use crate::{Error, Result};
 
+/// The most uncompressed data per cabinet; larger packages get several.
+const CABINET_LIMIT: usize = 1 << 30;
+
 /// Who the package installs for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -34,6 +37,7 @@ pub struct Msi {
     archs: Option<Vec<Arch>>,
     upgrade_code: Option<String>,
     shortcut: bool,
+    wizard: bool,
 }
 
 impl Default for Msi {
@@ -94,10 +98,114 @@ fn key(prefix: &str, path: &str) -> String {
     format!("{prefix}_{}", &hex(&sha256(path.to_lowercase().as_bytes()))[..16])
 }
 
+/// One `_Validation` rule: (category, min, max, key table, key column, set).
+type Rule = (&'static str, Option<i32>, Option<i32>, Option<&'static str>, Option<i32>, Option<&'static str>);
+
+/// The validation rule Windows Installer's schema gives a column.
+fn rule(table: &str, column: &str) -> Rule {
+    const MAX: i32 = i32::MAX;
+    let fk = |t: &'static str| -> Rule { ("Identifier", None, None, Some(t), Some(1), None) };
+    match (table, column) {
+        (_, "Property") | ("Directory", "Directory") | ("Component", "Component") | ("File", "File") | ("Feature", "Feature") | ("Shortcut", "Shortcut") | ("Registry", "Registry") | ("Icon", "Name") => ("Identifier", None, None, None, None, None),
+        (_, "Action") => ("Identifier", None, None, None, None, None),
+        ("Property", "Value") => ("Text", None, None, None, None, None),
+        ("Directory", "Directory_Parent") => fk("Directory"),
+        ("Directory", "DefaultDir") => ("DefaultDir", None, None, None, None, None),
+        ("Component", "ComponentId") | ("Upgrade", "UpgradeCode") => ("Guid", None, None, None, None, None),
+        ("Component", "Directory_") | ("Shortcut", "Directory_") => fk("Directory"),
+        ("Component", "Attributes") => ("", Some(0), Some(32767), None, None, None),
+        ("Component", "Condition") | ("LaunchCondition", "Condition") | (_, "Condition") => ("Condition", None, None, None, None, None),
+        ("Component", "KeyPath") => ("Identifier", None, None, Some("File;Registry;ODBCDataSource"), Some(1), None),
+        ("File", "Component_") | ("FeatureComponents", "Component_") | ("Shortcut", "Component_") | ("Registry", "Component_") => fk("Component"),
+        ("File", "FileName") | ("Shortcut", "Name") => ("Filename", None, None, None, None, None),
+        ("File", "FileSize") => ("", Some(0), Some(MAX), None, None, None),
+        ("File", "Version") => ("Version", None, None, Some("File"), Some(1), None),
+        ("File", "Language") | ("Upgrade", "Language") => ("Language", None, None, None, None, None),
+        ("File", "Attributes") => ("", Some(0), Some(32767), None, None, None),
+        ("File", "Sequence") => ("", Some(1), Some(MAX), None, None, None),
+        ("Feature", "Feature_Parent") | ("FeatureComponents", "Feature_") => fk("Feature"),
+        ("Feature", "Title") | ("Feature", "Description") | ("Shortcut", "Description") | ("Media", "DiskPrompt") | ("Media", "VolumeLabel") => ("Text", None, None, None, None, None),
+        ("Feature", "Display") | ("Feature", "Level") => ("", Some(0), Some(32767), None, None, None),
+        ("Feature", "Directory_") => ("UpperCase", None, None, Some("Directory"), Some(1), None),
+        ("Feature", "Attributes") => ("", None, None, None, None, Some("0;1;2;4;5;6;8;9;10;16;17;18;20;21;22;24;25;26;32;33;34;36;37;38;48;49;50;52;53;54")),
+        ("Media", "DiskId") => ("", Some(1), Some(32767), None, None, None),
+        ("Media", "LastSequence") => ("", Some(0), Some(MAX), None, None, None),
+        ("Media", "Cabinet") => ("Cabinet", None, None, None, None, None),
+        ("Media", "Source") => ("Property", None, None, None, None, None),
+        ("Upgrade", "VersionMin") | ("Upgrade", "VersionMax") => ("Text", None, None, None, None, None),
+        ("Upgrade", "Attributes") => ("", Some(0), Some(MAX), None, None, None),
+        ("Upgrade", "Remove") | ("LaunchCondition", "Description") | ("Shortcut", "Arguments") | ("Registry", "Name") | ("Registry", "Value") => ("Formatted", None, None, None, None, None),
+        ("Upgrade", "ActionProperty") => ("UpperCase", None, None, None, None, None),
+        (_, "Sequence") => ("", Some(-4), Some(32767), None, None, None),
+        ("Shortcut", "Target") => ("Shortcut", None, None, None, None, None),
+        ("Shortcut", "Hotkey") => ("", Some(0), Some(32767), None, None, None),
+        ("Shortcut", "Icon_") => fk("Icon"),
+        ("Shortcut", "IconIndex") => ("", Some(-32767), Some(32767), None, None, None),
+        ("Shortcut", "ShowCmd") => ("", None, None, None, None, Some("1;3;7")),
+        ("Shortcut", "WkDir") => ("Identifier", None, None, None, None, None),
+        ("Registry", "Root") => ("", Some(-1), Some(3), None, None, None),
+        ("Registry", "Key") => ("RegPath", None, None, None, None, None),
+        ("Icon", "Data") => ("Binary", None, None, None, None, None),
+        ("Dialog", "Dialog") | ("Control", "Control") | ("Control", "Type") | ("TextStyle", "TextStyle") | ("UIText", "Key") => ("Identifier", None, None, None, None, None),
+        ("Dialog", "Title") | ("Control", "Text") => ("Formatted", None, None, None, None, None),
+        ("ListBox", "Value") => ("Identifier", None, None, None, None, None),
+        ("ListBox", "Order") => ("", Some(1), Some(32767), None, None, None),
+        ("Dialog", "Control_First") | ("Dialog", "Control_Default") | ("Dialog", "Control_Cancel") => ("Identifier", None, None, Some("Control"), Some(2), None),
+        ("Control", "Dialog_") | ("ControlEvent", "Dialog_") | ("EventMapping", "Dialog_") => ("Identifier", None, None, Some("Dialog"), Some(1), None),
+        ("Control", "Control_Next") => ("Identifier", None, None, Some("Control"), Some(2), None),
+        ("ControlEvent", "Control_") | ("EventMapping", "Control_") => ("Identifier", None, None, Some("Control"), Some(2), None),
+        ("EventMapping", "Attribute") => ("Identifier", None, None, None, None, None),
+        ("ControlEvent", "Event") | ("EventMapping", "Event") => ("Formatted", None, None, None, None, None),
+        ("ControlEvent", "Argument") => ("Formatted", None, None, None, None, None),
+        ("TextStyle", "FaceName") | ("Control", "Help") => ("Text", None, None, None, None, None),
+        ("Dialog", "HCentering") | ("Dialog", "VCentering") => ("", Some(0), Some(100), None, None, None),
+        ("Dialog", "Width") | ("Dialog", "Height") | ("Control", "X") | ("Control", "Y") | ("Control", "Width") | ("Control", "Height") | ("TextStyle", "Size") => ("", Some(0), Some(32767), None, None, None),
+        ("Dialog", "Attributes") | ("Control", "Attributes") => ("", Some(0), Some(i32::MAX), None, None, None),
+        ("TextStyle", "Color") => ("", Some(0), Some(16_777_215), None, None, None),
+        ("TextStyle", "StyleBits") => ("", Some(0), Some(15), None, None, None),
+        ("ControlEvent", "Ordering") => ("", Some(0), Some(2_147_483_647), None, None, None),
+        _ => ("Text", None, None, None, None, None),
+    }
+}
+
+/// The `_Validation` table for `tables` (what ICE validation checks the data against).
+fn validation(tables: &[Table]) -> Table {
+    use crate::format::msi::Kind;
+    let mut v = Table::new(
+        "_Validation",
+        vec![col("Table", "*s32"), col("Column", "*s32"), col("Nullable", "s4"), col("MinValue", "i4?"), col("MaxValue", "i4?"), col("KeyTable", "s255?"), col("KeyColumn", "i2?"), col("Category", "s32?"), col("Set", "l255?"), col("Description", "l255?")],
+    );
+    for t in tables {
+        for c in &t.columns {
+            let (cat, min, max, kt, kc, set) = rule(&t.name, &c.name);
+            let integer = matches!(c.kind, Kind::Short | Kind::Long);
+            let (cat, min, max) = if integer {
+                let (lo, hi) = if c.kind == Kind::Short { (-32767, 32767) } else { (i32::MIN + 1, i32::MAX) };
+                ("", min.or(Some(lo)).filter(|_| set.is_none()), max.or(Some(hi)).filter(|_| set.is_none()))
+            } else {
+                (cat, None, None)
+            };
+            v.row(vec![
+                t.name.clone().into(),
+                c.name.clone().into(),
+                (if c.nullable { "Y" } else { "N" }).into(),
+                min.map(Value::Int).unwrap_or(Value::Null),
+                max.map(Value::Int).unwrap_or(Value::Null),
+                kt.map(Value::from).unwrap_or(Value::Null),
+                kc.map(Value::Int).unwrap_or(Value::Null),
+                (if cat.is_empty() { Value::Null } else { cat.into() }),
+                set.map(Value::from).unwrap_or(Value::Null),
+                Value::Null,
+            ]);
+        }
+    }
+    v
+}
+
 impl Msi {
     /// Per-machine, one package per Windows binary, with a Start menu shortcut.
     pub fn new() -> Self {
-        Msi { scope: Scope::PerMachine, archs: None, upgrade_code: None, shortcut: true }
+        Msi { scope: Scope::PerMachine, archs: None, upgrade_code: None, shortcut: true, wizard: false }
     }
     /// Installs for the current user only (no elevation).
     pub fn per_user(mut self) -> Self {
@@ -117,6 +225,12 @@ impl Msi {
     /// An existing UpgradeCode, for apps moving from another installer.
     pub fn upgrade_code(mut self, code: impl Into<String>) -> Self {
         self.upgrade_code = Some(code.into());
+        self
+    }
+    /// Shows a minimal install wizard (Welcome with the install folder, progress, finished)
+    /// instead of Windows Installer's basic progress window.
+    pub fn wizard(mut self) -> Self {
+        self.wizard = true;
         self
     }
     /// Leaves out the Start menu shortcut.
@@ -187,7 +301,21 @@ impl Msi {
             fc.row(vec!["Main".into(), ckey.into()]);
             cab_files.push(CabFile { name: fkey, data: data.clone() });
         }
-        let cabinet = cab::write(&cab_files, source_date_epoch())?;
+        // Cabinets of at most CABINET_LIMIT uncompressed bytes each (a cabinet tops out at 4 GB).
+        let mut cabinets: Vec<(i32, Vec<u8>)> = Vec::new(); // (last sequence, cabinet)
+        let mut batch: Vec<CabFile> = Vec::new();
+        let mut batch_size = 0usize;
+        let n_files = cab_files.len();
+        for (i, f) in cab_files.into_iter().enumerate() {
+            if !batch.is_empty() && batch_size + f.data.len() > CABINET_LIMIT {
+                cabinets.push((i as i32, cab::write(&std::mem::take(&mut batch), source_date_epoch())?));
+                batch_size = 0;
+            }
+            batch_size += f.data.len();
+            batch.push(f);
+        }
+        cabinets.push((n_files as i32, cab::write(&batch, source_date_epoch())?));
+        let cab_name = |k: usize| if k == 0 { "data.cab".to_string() } else { format!("data{}.cab", k + 1) };
 
         let mut property = Table::new("Property", vec![col("Property", "*s72"), col("Value", "l0")]);
         let mut props = vec![
@@ -217,6 +345,12 @@ impl Msi {
         if let Some(c) = &app.description {
             props.push(("ARPCOMMENTS", c.clone()));
         }
+        let ui = self.wizard.then(|| super::msi_ui::wizard(self.scope == Scope::PerMachine));
+        if let Some(ui) = &ui {
+            for (k, v) in &ui.properties {
+                props.push((k, (*v).into()));
+            }
+        }
         for (k, v) in props {
             property.row(vec![k.into(), v.into()]);
         }
@@ -224,7 +358,9 @@ impl Msi {
         let mut feature = Table::new("Feature", vec![col("Feature", "*s38"), col("Feature_Parent", "s38?"), col("Title", "l64?"), col("Description", "l255?"), col("Display", "i2?"), col("Level", "i2"), col("Directory_", "s72?"), col("Attributes", "i2")]);
         feature.row(vec!["Main".into(), Value::Null, app.name.clone().into(), Value::Null, 0.into(), 1.into(), "INSTALLDIR".into(), 0.into()]);
         let mut media = Table::new("Media", vec![col("DiskId", "*i2"), col("LastSequence", "i4"), col("DiskPrompt", "l64?"), col("Cabinet", "s255?"), col("VolumeLabel", "s32?"), col("Source", "s72?")]);
-        media.row(vec![1.into(), (files.len() as i32).into(), Value::Null, "#data.cab".into(), Value::Null, Value::Null]);
+        for (k, (last, _)) in cabinets.iter().enumerate() {
+            media.row(vec![(k as i32 + 1).into(), (*last).into(), Value::Null, format!("#{}", cab_name(k)).into(), Value::Null, Value::Null]);
+        }
 
         let mut upgrade_t = Table::new("Upgrade", vec![col("UpgradeCode", "*s38"), col("VersionMin", "*s20?"), col("VersionMax", "*s20?"), col("Language", "*s255?"), col("Attributes", "*i4"), col("Remove", "s255?"), col("ActionProperty", "s72")]);
         // Older versions are removed (migrating feature states); newer ones are detected to block
@@ -263,23 +399,36 @@ impl Msi {
         ] {
             exec.row(vec![a.into(), Value::Null, n.into()]);
         }
-        let mut ui = Table::new("InstallUISequence", seq_cols());
+        let mut ui_seq = Table::new("InstallUISequence", seq_cols());
         for (a, n) in [("FindRelatedProducts", 25), ("LaunchConditions", 100), ("ValidateProductID", 700), ("CostInitialize", 800), ("FileCost", 900), ("CostFinalize", 1000), ("MigrateFeatureStates", 1200), ("ExecuteAction", 1300)] {
-            ui.row(vec![a.into(), Value::Null, n.into()]);
+            ui_seq.row(vec![a.into(), Value::Null, n.into()]);
+        }
+        if let Some(ui) = &ui {
+            for (a, c, n) in &ui.sequence {
+                ui_seq.row(vec![(*a).into(), c.map(Value::from).unwrap_or(Value::Null), (*n).into()]);
+            }
         }
 
-        let mut tables = vec![directory, component, file, fc, property, feature, media, upgrade_t, launch, exec, ui];
+        let mut tables = Vec::new();
         if !icon.rows.is_empty() {
             tables.push(icon);
         }
+        let mut reg = Table::new("Registry", vec![col("Registry", "*s72"), col("Root", "i2"), col("Key", "l255"), col("Name", "l255?"), col("Value", "l0?"), col("Component_", "s72")]);
+        let manufacturer_dir = manufacturer.replace('\\', "-");
         if self.shortcut {
+            // The shortcut gets a component of its own, keyed by a per-user registry value
+            // (ICE43/ICE57: non-advertised shortcuts need an HKCU key path).
+            let sc_comp = "C_shortcut".to_string();
+            let sc_key = "R_shortcut".to_string();
+            component.row(vec![sc_comp.clone().into(), guid(&format!("msi-component:{upgrade}:{}:shortcut", arch.name())).into(), "INSTALLDIR".into(), (if x64 { 256 | 4 } else { 4 }).into(), Value::Null, sc_key.clone().into()]);
+            fc.row(vec!["Main".into(), sc_comp.clone().into()]);
+            reg.row(vec![sc_key.into(), 1.into(), format!("Software\\{}\\{}", manufacturer_dir, app.name).into(), "Shortcut".into(), "#1".into(), sc_comp.clone().into()]);
             let mut sc = Table::new("Shortcut", vec![col("Shortcut", "*s72"), col("Directory_", "s72"), col("Name", "l128"), col("Component_", "s72"), col("Target", "s72"), col("Arguments", "s255?"), col("Description", "l255?"), col("Hotkey", "i2?"), col("Icon_", "s72?"), col("IconIndex", "i2?"), col("ShowCmd", "i2?"), col("WkDir", "s72?")]);
             let mut used = HashSet::new();
-            sc.row(vec!["S_main".into(), "ProgramMenuFolder".into(), short_long(&file_name(&app.name), &mut used).into(), exe_comp.clone().into(), format!("[#{exe_key}]").into(), Value::Null, app.description.clone().into(), Value::Null, Value::Null, Value::Null, Value::Null, "INSTALLDIR".into()]);
+            sc.row(vec!["S_main".into(), "ProgramMenuFolder".into(), short_long(&file_name(&app.name), &mut used).into(), sc_comp.into(), format!("[INSTALLDIR]{exe_file}").into(), Value::Null, app.description.clone().into(), Value::Null, Value::Null, Value::Null, Value::Null, "INSTALLDIR".into()]);
             tables.push(sc);
         }
         let open = format!("\"[#{exe_key}]\" \"%1\"");
-        let mut reg = Table::new("Registry", vec![col("Registry", "*s72"), col("Root", "i2"), col("Key", "l255"), col("Name", "l255?"), col("Value", "l0?"), col("Component_", "s72")]);
         for s in &app.url_schemes {
             let k = s.to_lowercase();
             reg.row(vec![key("R", &format!("url:{k}")).into(), 0.into(), k.clone().into(), Value::Null, format!("URL:{} Protocol", app.name).into(), exe_comp.clone().into()]);
@@ -297,8 +446,15 @@ impl Msi {
         if !reg.rows.is_empty() {
             tables.push(reg);
         }
+        tables.extend([directory, component, file, fc, property, feature, media, upgrade_t, launch, exec, ui_seq]);
+        if let Some(ui) = ui {
+            tables.extend(ui.tables);
+        }
 
-        let package_code = guid(&format!("msi-package:{product}:{}", hex(&sha256(&cabinet))));
+        let v = validation(&tables);
+        tables.push(v);
+        let all: Vec<u8> = cabinets.iter().flat_map(|(_, c)| sha256(c)).collect();
+        let package_code = guid(&format!("msi-package:{product}:{}", hex(&sha256(&all))));
         let summary = Summary {
             title: "Installation Database".into(),
             subject: app.name.clone(),
@@ -313,7 +469,8 @@ impl Msi {
             word_count: if self.scope == Scope::PerUser { 2 | 8 } else { 2 },
             security: 2,
         };
-        Ok(Database { tables, streams: vec![("data.cab".into(), cabinet)], summary })
+        let streams = cabinets.into_iter().enumerate().map(|(k, (_, c))| (cab_name(k), c)).collect();
+        Ok(Database { tables, streams, summary })
     }
 }
 

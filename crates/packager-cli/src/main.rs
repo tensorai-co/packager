@@ -125,8 +125,8 @@ fn build(args: &[String]) -> Result<(), String> {
     let only: Option<Vec<&str>> = a.value("only").map(|o| o.split(',').map(str::trim).collect());
     if let Some(o) = &only {
         for k in o {
-            if !["app", "dmg", "pkg", "msix", "msi"].contains(k) {
-                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix, msi)"));
+            if !["app", "dmg", "pkg", "msix", "msixbundle", "msi"].contains(k) {
+                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix, msixbundle, msi)"));
             }
         }
     }
@@ -152,12 +152,16 @@ fn build(args: &[String]) -> Result<(), String> {
         b = b.package(cfg.msix.clone().unwrap_or_default());
         any = true;
     }
+    if want("msixbundle", cfg.msixbundle.is_some()) {
+        b = b.package(cfg.msixbundle.clone().unwrap_or_else(packager::package::MsixBundle::all));
+        any = true;
+    }
     if want("msi", cfg.msi.is_some()) {
         b = b.package(cfg.msi.clone().unwrap_or_default());
         any = true;
     }
     if !any {
-        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msi], or pass --only".into());
+        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msixbundle] / [package.msi], or pass --only".into());
     }
     if let Some(apple) = cfg.apple {
         b = b.sign(apple);
@@ -278,6 +282,22 @@ fn verify(args: &[String]) -> Result<(), String> {
                 None => "no embedded cabinet".into(),
             };
             println!("{}: valid installer database ({} tables, {rows} rows, {files} files; {cab_ok}); {sig}", path.display(), db.tables.len());
+        }
+        "msixbundle" | "appxbundle" => {
+            let sig = match packager::format::appx::verify(&data).map_err(e)? {
+                None => "not signed".to_string(),
+                Some(v) => format!("bundle signature valid ({})", v.cms.signer.common_name().unwrap_or("?")),
+            };
+            let inner = packager::format::appx::bundle_packages(&data).map_err(e)?;
+            let mut parts = Vec::new();
+            for (name, pkg) in &inner {
+                let s = match packager::format::appx::verify(pkg).map_err(|x| format!("{name}: {x}"))? {
+                    None => "unsigned",
+                    Some(_) => "signed",
+                };
+                parts.push(format!("{name} ({s})"));
+            }
+            println!("{}: valid bundle, {sig}; packages: {}", path.display(), parts.join(", "));
         }
         "msix" | "appx" => {
             match packager::format::appx::verify(&data).map_err(e)? {

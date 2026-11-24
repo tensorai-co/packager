@@ -161,11 +161,17 @@ pub fn write(payload: &[(String, Vec<u8>)], manifest: &[u8], signer: Option<(&dy
         let w = z.add_described(&part_name(p), zip::Method::Stored, d, crc32(d), d.len())?;
         bm = bm.child(block_map_file(p, d, w.header_len));
     }
+    let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+    let ct = content_types(&paths, signer.is_some());
+    finish(z, bm, ct, signer, &APPX_SIP_GUID)
+}
+
+/// Adds the block map, `[Content_Types].xml` and (when signing) the signature, and finishes.
+fn finish(mut z: ZipWriter, bm: Element, ct: String, signer: Option<(&dyn Signer, &Options)>, guid: &[u8; 16]) -> Result<Vec<u8>> {
     let bm_xml = bm.to_document(0).replacen("?>", " standalone=\"no\"?>", 1).into_bytes();
     let bm_z = crate::compress::deflate(&bm_xml, crate::compress::Level::DEFAULT);
     z.add_described(BLOCK_MAP, zip::Method::Deflate, &bm_z, crc32(&bm_xml), bm_xml.len())?;
-    let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
-    let ct = content_types(&paths, signer.is_some()).into_bytes();
+    let ct = ct.into_bytes();
     z.add(CONTENT_TYPES, &ct, true, 0o100644)?;
     let Some((signer, opts)) = signer else { return z.finish() };
 
@@ -173,11 +179,79 @@ pub fn write(payload: &[(String, Vec<u8>)], manifest: &[u8], signer: Option<(&dy
     let mut cd = z.central_directory().to_vec();
     cd.extend_from_slice(&z.end_record()?);
     let blob = digest_blob(&sha256(z.local_records()), &sha256(&cd), &sha256(&ct), &sha256(&bm_xml));
-    let p7 = authenticode::signed_data(signer, &indirect_data(&blob, &APPX_SIP_GUID), opts)?;
+    let p7 = authenticode::signed_data(signer, &indirect_data(&blob, guid), opts)?;
     let mut p7x = b"PKCX".to_vec();
     p7x.extend_from_slice(&p7);
     z.add(SIGNATURE, &p7x, true, 0o100644)?;
     z.finish()
+}
+
+/// The identity of a bundle and of each package in it, for `AppxBundleManifest.xml`.
+#[derive(Debug, Clone)]
+pub struct BundlePackage {
+    /// File name in the bundle (`My App-1.4.0-x64.msix`).
+    pub file_name: String,
+    /// The package (already signed with the bundle's certificate).
+    pub data: Vec<u8>,
+    /// Its `Version` (`1.4.0.0`).
+    pub version: String,
+    /// Its `ProcessorArchitecture` (`x64`, `arm64`).
+    pub architecture: String,
+    /// `TargetDeviceFamily` (`Windows.Desktop`, min version, max version tested).
+    pub device_family: (String, String, String),
+}
+
+/// Writes an `.msixbundle`: the packages stored as they are, `AppxMetadata/AppxBundleManifest.xml`
+/// pointing at each package's bytes, and a bundle signature. The bundle's block map covers only
+/// the manifest; each package has its own.
+pub fn write_bundle(name: &str, publisher: &str, version: &str, packages: &[BundlePackage], signer: Option<(&dyn Signer, &Options)>, mtime: i64) -> Result<Vec<u8>> {
+    const BUNDLE_MANIFEST: &str = "AppxMetadata/AppxBundleManifest.xml";
+    let mut z = ZipWriter::new(mtime, false).appx();
+    let mut list = Element::new("Packages");
+    for p in packages {
+        let w = z.add_described(&part_name(&p.file_name), zip::Method::Stored, &p.data, crc32(&p.data), p.data.len())?;
+        let (family, min, max) = &p.device_family;
+        list = list.child(
+            Element::new("Package")
+                .attr("Type", "application")
+                .attr("Version", p.version.clone())
+                .attr("Architecture", p.architecture.clone())
+                .attr("FileName", p.file_name.clone())
+                .attr("Offset", (w.offset + w.header_len).to_string())
+                .attr("Size", p.data.len().to_string())
+                .child(Element::new("Resources").child(Element::new("Resource").attr("Language", "en-us")))
+                .child(Element::new("b4:Dependencies").child(Element::new("b4:TargetDeviceFamily").attr("Name", family.clone()).attr("MinVersion", min.clone()).attr("MaxVersionTested", max.clone()))),
+        );
+    }
+    let manifest = Element::new("Bundle")
+        .attr("xmlns", "http://schemas.microsoft.com/appx/2013/bundle")
+        .attr("SchemaVersion", "5.0")
+        .attr("xmlns:b4", "http://schemas.microsoft.com/appx/2018/bundle")
+        .attr("xmlns:b5", "http://schemas.microsoft.com/appx/2019/bundle")
+        .attr("IgnorableNamespaces", "b4 b5")
+        .child(Element::new("Identity").attr("Name", name).attr("Publisher", publisher).attr("Version", version))
+        .child(list)
+        .to_document(1)
+        .replacen("?>", " standalone=\"no\"?>", 1)
+        .into_bytes();
+    let w = z.add_described(BUNDLE_MANIFEST, zip::Method::Stored, &manifest, crc32(&manifest), manifest.len())?;
+    let bm = Element::new("BlockMap").attr("xmlns", "http://schemas.microsoft.com/appx/2010/blockmap").attr("HashMethod", SHA256_URI).child(block_map_file(BUNDLE_MANIFEST, &manifest, w.header_len));
+    let mut ct = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">");
+    ct.push_str("<Default Extension=\"msix\" ContentType=\"application/vnd.ms-appx\"/>");
+    ct.push_str("<Default Extension=\"appx\" ContentType=\"application/vnd.ms-appx\"/>");
+    ct.push_str("<Override PartName=\"/AppxMetadata/AppxBundleManifest.xml\" ContentType=\"application/vnd.ms-appx.bundlemanifest+xml\"/>");
+    ct.push_str("<Override PartName=\"/AppxBlockMap.xml\" ContentType=\"application/vnd.ms-appx.blockmap+xml\"/>");
+    if signer.is_some() {
+        ct.push_str("<Override PartName=\"/AppxSignature.p7x\" ContentType=\"application/vnd.ms-appx.signature\"/>");
+    }
+    ct.push_str("</Types>");
+    finish(z, bm, ct, signer, &APPX_BUNDLE_SIP_GUID)
+}
+
+/// The packages in a bundle: (file name, bytes).
+pub fn bundle_packages(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
+    let (entries, _) = zip::read_entries(data)?;
+    entries.iter().filter(|e| e.name.to_lowercase().ends_with(".msix") || e.name.to_lowercase().ends_with(".appx")).map(|e| Ok((decode_part_name(&e.name), zip::entry_data(data, e)?))).collect()
 }
 
 /// A verified package signature.

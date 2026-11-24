@@ -41,8 +41,11 @@ install_location = "/Applications"
 # scope = "per-user"               # %LocalAppData%\Programs, no UAC prompt (default per-machine)
 # upgrade_code = "{…}"             # only when migrating from another installer
 # shortcut = false                 # no Start menu shortcut
+# ui = "wizard"                    # Welcome / progress / finished screens (default: basic progress)
 
 [package.msix]                    # one per Windows binary; needs [sign.windows] to install
+# [package.msixbundle]             # all Windows binaries' .msix in one bundle (takes [package.msix]'s settings)
+# archs = ["windows-x64", "windows-arm64"]
 # min_version = "10.0.17763.0"
 # background = "transparent"
 # execution_alias = "my-app"       # run as `my-app` from a terminal (command-line apps)

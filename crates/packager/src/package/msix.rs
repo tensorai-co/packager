@@ -192,25 +192,101 @@ impl PackageBuilder for Msix {
     }
     fn build(&self, ctx: &mut Context) -> Result<Vec<Package>> {
         let app = ctx.app;
-        let publisher = match (ctx.authenticode, &self.publisher) {
-            (Some(a), _) => a.signer.leaf().map(|c| c.windows_subject()).ok_or_else(|| Error::Other("Authenticode signer has no certificate".into()))?,
-            (None, Some(p)) => p.clone(),
-            (None, None) => format!("CN={}", crate::crypto::x509::windows_dn_value(app.publisher.as_deref().unwrap_or(&app.name))),
-        };
+        let publisher = self.publisher_for(ctx)?;
         let mut out = Vec::new();
         for arch in self.archs_for(app) {
-            let mut payload = vec![(exe_name(app), prepare_exe(app, arch, ctx.authenticode)?)];
-            payload.extend(resource_files(app)?);
-            payload.extend(Self::logos(app)?);
-            let manifest = self.manifest(app, arch, &publisher)?;
-            let opts = ctx.authenticode.map(|a| a.options());
-            let signer = ctx.authenticode.zip(opts.as_ref()).map(|(a, o)| (a.signer.as_ref(), o));
-            let pkg = appx::write(&payload, manifest.as_bytes(), signer, source_date_epoch())?;
+            let pkg = self.package_bytes(ctx, arch, &publisher)?;
             std::fs::create_dir_all(&ctx.out_dir).at(&ctx.out_dir)?;
-            let path = ctx.out_dir.join(format!("{}-{}-{}.msix", file_name(&app.name), app.version, arch_label(arch)));
+            let path = ctx.out_dir.join(Self::file_name_for(app, arch));
             std::fs::write(&path, pkg).at(&path)?;
             out.push(Package::file(PackageKind::Msix, arch.name(), path, ctx.authenticode.is_some())?);
         }
         Ok(out)
+    }
+}
+
+impl Msix {
+    fn publisher_for(&self, ctx: &Context) -> Result<String> {
+        let app = ctx.app;
+        Ok(match (ctx.authenticode, &self.publisher) {
+            (Some(a), _) => a.signer.leaf().map(|c| c.windows_subject()).ok_or_else(|| Error::Other("Authenticode signer has no certificate".into()))?,
+            (None, Some(p)) => p.clone(),
+            (None, None) => format!("CN={}", crate::crypto::x509::windows_dn_value(app.publisher.as_deref().unwrap_or(&app.name))),
+        })
+    }
+
+    fn file_name_for(app: &App, arch: Arch) -> String {
+        format!("{}-{}-{}.msix", file_name(&app.name), app.version, arch_label(arch))
+    }
+
+    /// One signed package for `arch`.
+    fn package_bytes(&self, ctx: &Context, arch: Arch, publisher: &str) -> Result<Vec<u8>> {
+        let app = ctx.app;
+        let mut payload = vec![(exe_name(app), prepare_exe(app, arch, ctx.authenticode)?)];
+        payload.extend(resource_files(app)?);
+        payload.extend(Self::logos(app)?);
+        let manifest = self.manifest(app, arch, publisher)?;
+        let opts = ctx.authenticode.map(|a| a.options());
+        let signer = ctx.authenticode.zip(opts.as_ref()).map(|(a, o)| (a.signer.as_ref(), o));
+        appx::write(&payload, manifest.as_bytes(), signer, source_date_epoch())
+    }
+}
+
+/// `.msixbundle`: one download with a package per architecture; Windows installs the one that
+/// matches. Each inner package and the bundle are signed with the same identity.
+#[derive(Debug, Clone)]
+pub struct MsixBundle {
+    msix: Msix,
+}
+
+impl MsixBundle {
+    /// A bundle of these architectures' packages (those the app has binaries for).
+    pub fn new(archs: impl IntoIterator<Item = Arch>) -> Self {
+        MsixBundle { msix: Msix::new().archs(archs) }
+    }
+    /// A bundle of every Windows architecture the app has.
+    pub fn all() -> Self {
+        MsixBundle { msix: Msix::new() }
+    }
+    /// The settings for the packages inside (logos, alias, minimum version…).
+    pub fn packages(mut self, msix: Msix) -> Self {
+        let archs = self.msix.archs.take();
+        self.msix = msix;
+        if self.msix.archs.is_none() {
+            self.msix.archs = archs;
+        }
+        self
+    }
+}
+
+impl PackageBuilder for MsixBundle {
+    fn kind(&self) -> PackageKind {
+        PackageKind::MsixBundle
+    }
+    fn validate(&self, app: &App) -> Result<()> {
+        self.msix.validate(app)
+    }
+    fn build(&self, ctx: &mut Context) -> Result<Vec<Package>> {
+        let app = ctx.app;
+        let publisher = self.msix.publisher_for(ctx)?;
+        let version = msix_version(app)?;
+        let mut packages = Vec::new();
+        for arch in self.msix.archs_for(app) {
+            packages.push(appx::BundlePackage {
+                file_name: Msix::file_name_for(app, arch),
+                data: self.msix.package_bytes(ctx, arch, &publisher)?,
+                version: version.clone(),
+                architecture: arch_label(arch).into(),
+                device_family: ("Windows.Desktop".into(), self.msix.min_version.clone(), self.msix.max_version_tested.clone()),
+            });
+        }
+        let opts = ctx.authenticode.map(|a| a.options());
+        let signer = ctx.authenticode.zip(opts.as_ref()).map(|(a, o)| (a.signer.as_ref(), o));
+        let bundle = appx::write_bundle(&app.identifier, &publisher, &version, &packages, signer, source_date_epoch())?;
+        std::fs::create_dir_all(&ctx.out_dir).at(&ctx.out_dir)?;
+        let path = ctx.out_dir.join(format!("{}-{}.msixbundle", file_name(&app.name), app.version));
+        std::fs::write(&path, bundle).at(&path)?;
+        let label = packages.iter().map(|p| p.architecture.as_str()).collect::<Vec<_>>().join("+");
+        Ok(vec![Package::file(PackageKind::MsixBundle, format!("windows-{label}"), path, ctx.authenticode.is_some())?])
     }
 }
