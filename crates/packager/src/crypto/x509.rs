@@ -154,6 +154,27 @@ impl Certificate {
         self.extensions.iter().find(|e| e.oid == oid)
     }
 
+    /// The subject as Windows writes it (`CN=…, O=…, C=…`: RDNs in reverse order), which an
+    /// MSIX manifest's `Publisher` must equal.
+    pub fn windows_subject(&self) -> String {
+        let key = |o: &[u8]| -> String {
+            match o {
+                x if x == oids::CN => "CN".into(),
+                x if x == oids::O => "O".into(),
+                x if x == oids::OU => "OU".into(),
+                x if x == oids::C => "C".into(),
+                x if x == oids::EMAIL => "E".into(),
+                [0x55, 0x04, 0x07] => "L".into(),
+                [0x55, 0x04, 0x08] => "S".into(),
+                [0x55, 0x04, 0x09] => "STREET".into(),
+                [0x55, 0x04, 0x05] => "SERIALNUMBER".into(),
+                [0x09, 0x92, 0x26, 0x89, 0x93, 0xf2, 0x2c, 0x64, 0x01, 0x19] => "DC".into(),
+                other => format!("OID.{}", crate::crypto::der::oid_to_string(other)),
+            }
+        };
+        self.subject.iter().rev().map(|(o, v)| format!("{}={}", key(o), windows_dn_value(v))).collect::<Vec<_>>().join(", ")
+    }
+
     /// SHA-1 of the DER (what requirements call `H"…"` for certificates).
     pub fn sha1(&self) -> [u8; 20] {
         crate::crypto::sha1(&self.der)
@@ -204,6 +225,12 @@ impl Certificate {
     }
 }
 
+/// A DN value quoted the way Windows' `CertNameToStr` does when it needs to be.
+pub fn windows_dn_value(v: &str) -> String {
+    let needs = v.is_empty() || v.starts_with(' ') || v.ends_with(' ') || v.contains([',', '+', '=', '"', '\n', '<', '>', '#', ';']);
+    if needs { format!("\"{}\"", v.replace('"', "\"\"")) } else { v.to_string() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,3 +248,4 @@ mod tests {
         assert_eq!(c.public_key, key.public());
     }
 }
+

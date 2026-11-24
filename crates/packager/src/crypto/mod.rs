@@ -52,12 +52,28 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
     h.finish()
 }
 
-/// Cryptographically secure random bytes from the OS.
+/// Cryptographically secure random bytes from the OS (`/dev/urandom`; `ProcessPrng` on
+/// Windows, the same source Rust's standard library uses).
 pub fn random_bytes(n: usize) -> crate::Result<Vec<u8>> {
-    use std::io::Read;
     let mut buf = vec![0u8; n];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .map_err(|e| crate::Error::Other(format!("no OS randomness (/dev/urandom): {e}")))?;
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    {
+        #[link(name = "bcryptprimitives", kind = "raw-dylib")]
+        unsafe extern "system" {
+            fn ProcessPrng(data: *mut u8, len: usize) -> i32;
+        }
+        // SAFETY: `buf` is valid for `n` writable bytes; ProcessPrng always succeeds (returns TRUE).
+        if unsafe { ProcessPrng(buf.as_mut_ptr(), buf.len()) } == 0 {
+            return Err(crate::Error::Other("no OS randomness (ProcessPrng failed)".into()));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut buf))
+            .map_err(|e| crate::Error::Other(format!("no OS randomness (/dev/urandom): {e}")))?;
+    }
     Ok(buf)
 }

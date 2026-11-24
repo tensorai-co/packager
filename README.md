@@ -7,13 +7,21 @@ the library's public API.
 **Status: macOS.** `.app`, `.dmg` and `.pkg` are built, signed (ad hoc or with a real
 certificate, installer signatures included), notarized and stapled without `codesign`,
 `hdiutil`, `pkgbuild`, `productbuild`, `productsign`, `notarytool`, `stapler`, `spctl`, `iconutil`
-or `sips`. Windows and Debian/Ubuntu come later (see `proposed_packager_rs.md`).
+or `sips`.
+
+**Windows (in progress).** `.msix` packages are built and signed, and `.exe` files get their icon,
+version information and manifest (what `rcedit` does) and an Authenticode signature, without
+`makeappx`, `signtool` or `rcedit`. `.msixbundle` and `.msi` come next; Debian/Ubuntu after that
+(see `proposed_packager_rs.md`).
 
 | Package | What's written | Checked against (CI oracles, never runtime deps) |
 | --- | --- | --- |
 | `.app` | `Info.plist`, universal binary (merged from per-arch inputs), `.icns` from one PNG, resources, frameworks, ad-hoc signature on every Mach-O + sealed `CodeResources` | `codesign --verify --deep --strict`, `plutil -lint`, `lipo`, running it |
 | `.dmg` | HFSX volume (catalog B-tree, bitmap, NFD names), `Applications` link, volume icon, optional background + Finder layout (`.DS_Store` + alias), UDZO (zlib) UDIF; code signature on the image when signing with a certificate | `hdiutil verify`, `fsck_hfs`, mounting, `codesign --verify` on the image and the app inside |
 | `.pkg` | Flat product archive: XAR with `Distribution`, `PackageInfo` (not relocatable), `Bom`, gzip'd cpio payload, optional scripts; installer signature (RSA + CMS in the TOC) with an installer identity | `installer -pkginfo`, `pkgutil --expand-full`, `pkgutil --check-signature`, `lsbom`, payload diff |
+
+| `.exe` / `.dll` | Icon group (`.ico` from one PNG), `VS_VERSIONINFO`, manifest, in a rebuilt `.rsrc`; Authenticode (SHA-256, RFC 3161 timestamp), PE checksum | `Get-AuthenticodeSignature`, `signtool verify`, `signtool`-signed files read back, running it |
+| `.msix` | Signed exe, app files, logos from the icon, `AppxManifest.xml` (full trust, URL schemes, file types; `Publisher` from the certificate), `AppxBlockMap.xml`, `[Content_Types].xml`, `AppxSignature.p7x`, ZIP64 end records like `makeappx` | `Get-AuthenticodeSignature`, `makeappx unpack`, `makeappx`+`signtool` packages read back |
 
 Output is deterministic: same input, byte-identical packages (`SOURCE_DATE_EPOCH`, default
 1980-01-01).
@@ -89,6 +97,36 @@ packager codesign -v -R='anchor apple generic and certificate leaf[subject.OU] =
 packager codesign -d -r- --entitlements - My.app
 packager identities                  # like `security find-identity -v -p codesigning`
 ```
+
+## Windows
+
+```rust
+use packager::package::Msix;
+use packager::sign::{Authenticode, KeySigner};
+
+let signer = KeySigner::pkcs12("codesign.pfx", "password")?.into_arc();
+packager::build(&app)
+    .package(Msix::new().execution_alias("my-app"))  // one .msix per Windows binary; `my-app` on PATH
+    .sign(Authenticode::new(signer).timestamp("http://timestamp.digicert.com"))
+    .run()?;
+```
+
+```sh
+packager rcedit my-app.exe --icon icon.png --version 1.4.0 --set CompanyName="Example Ltd"
+packager sign my-app.exe -s p12:codesign.pfx --timestamp http://timestamp.digicert.com
+packager verify "dist/My App-1.4.0-x64.msix"   # block map, digests, signature
+```
+
+What it takes to match Windows: the MSIX signature's `AXCD` digest always covers ZIP64 end
+records, and Windows' package reader wants `makeappx`'s entry layout (MS-DOS "made by", ZIP64
+data descriptors), so packages are written exactly that way. Payload files are stored
+uncompressed for now (like `makeappx pack /nc`). Checked on Windows Server 2025: Windows
+reports our signatures as valid but for the (self-signed) root, and a changed byte as a hash
+mismatch; `signtool` computes the same file hash for our signatures as for its own, and our
+verifier accepts `signtool`- and `makeappx`-made files. With the certificate trusted for
+sideloading, `Add-AppxPackage` installs the package (no `resources.pri` needed), the Start menu
+entry, URL scheme, file type and execution alias are registered, the app runs through its alias,
+a higher version upgrades it, a lower one is refused, and `Remove-AppxPackage` removes it all.
 
 ## Notarization, stapling and Gatekeeper
 
@@ -177,6 +215,10 @@ certificate signatures, legacy dual CodeDirectories, disk-image signatures and t
 command lines with `codesign`; `oracle_crypto.rs` checks keys, certificates, PKCS#12 and
 requirements against `openssl` and `csreq`; `oracle_notary.rs` checks stapled disk images,
 installer signatures and submission ZIPs with `codesign`, `hdiutil`, `pkgutil`, `installer` and
-`ditto`. Its network test (`cargo test -- --ignored network`) staples a notarized package on
+`ditto`. `oracle_windows.rs` (on Windows) checks Authenticode and MSIX with
+`Get-AuthenticodeSignature` and `makeappx`; its opt-in install test (`cargo test -- --ignored
+msix_installs`, with `PACKAGER_MSIX_CERT`/`PACKAGER_MSIX_KEY` naming a sideload-trusted
+certificate) installs, runs, upgrades and removes a package. The notary tests' network test
+(`cargo test -- --ignored network`) staples a notarized package on
 this Mac and checks it with `stapler` and `spctl`. One test signs with your real Keychain identity and
 is opt-in: `cargo test -- --ignored keychain`.

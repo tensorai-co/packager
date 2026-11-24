@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::error::IoContext;
-use crate::format::{icns, png};
+use crate::format::{icns, ico, png};
 use crate::Result;
 
 /// An 8-bit RGBA image with straight (non-premultiplied) alpha, rows top to bottom.
@@ -121,6 +121,11 @@ fn resample_axis(src: &[[f32; 4]], w: usize, h: usize, n: usize, horizontal: boo
 /// An `.icns` with every size macOS uses, generated from one (ideally 1024×1024) PNG.
 pub fn icns_from_png(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     Ok(icns::from_image(&Image::open_png(path)?))
+}
+
+/// An `.ico` with the sizes Windows uses, generated from one PNG.
+pub fn ico_from_png(path: impl AsRef<Path>) -> Result<Vec<u8>> {
+    Ok(ico::from_image(&Image::open_png(path)?))
 }
 
 #[cfg(test)]

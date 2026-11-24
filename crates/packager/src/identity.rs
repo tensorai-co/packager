@@ -29,9 +29,36 @@ pub fn macos_versions(app: &App) -> Result<(String, String)> {
     Ok((short, build))
 }
 
+/// The MSIX `Version`: four parts, each at most 65535. The last is the numeric build number
+/// when given, else 0 (what the Store requires). Pre-releases can't be expressed.
+pub fn msix_version(app: &App) -> Result<String> {
+    let v = app.parsed_version()?;
+    if let Some(pre) = &v.pre {
+        return Err(Error::invalid("msix", "version", format!("`{}` has a pre-release (`{pre}`), which MSIX versions can't express", app.version)));
+    }
+    let fourth = match &app.build_number {
+        Some(b) => b.parse::<u64>().map_err(|_| Error::invalid("msix", "build_number", format!("`{b}` must be a number for MSIX's fourth version part")))?,
+        None => 0,
+    };
+    for (name, n) in [("major", v.major), ("minor", v.minor), ("patch", v.patch), ("build_number", fourth)] {
+        if n > 65535 {
+            return Err(Error::invalid("msix", "version", format!("the {name} part ({n}) is over 65535")));
+        }
+    }
+    Ok(format!("{}.{}.{}.{fourth}", v.major, v.minor, v.patch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msix_versions() {
+        assert_eq!(msix_version(&App::new("A", "com.a.b", "1.4.0")).unwrap(), "1.4.0.0");
+        assert_eq!(msix_version(&App::new("A", "com.a.b", "1.4.0").build_number("7")).unwrap(), "1.4.0.7");
+        assert!(msix_version(&App::new("A", "com.a.b", "1.4.0-beta.1")).is_err());
+        assert!(msix_version(&App::new("A", "com.a.b", "70000.0.0")).is_err());
+    }
 
     #[test]
     fn mac_versions() {

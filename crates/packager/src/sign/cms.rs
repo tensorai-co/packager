@@ -102,6 +102,12 @@ pub struct Verified {
 /// digest, the signer's signature over the signed attributes, and that the issuing chain links up.
 /// Trust in the anchor is the caller's decision.
 pub fn verify(cms: &[u8], content: &[u8]) -> Result<Verified> {
+    verify_with_counter_sign(cms, content, oids::TIMESTAMP_TOKEN)
+}
+
+/// [`verify`], reading the timestamp token from the unsigned attribute `timestamp_oid`
+/// (Authenticode puts it under `szOID_RFC3161_counterSign`).
+pub fn verify_with_counter_sign(cms: &[u8], content: &[u8], timestamp_oid: &[u8]) -> Result<Verified> {
     let bad = |m: &str| Error::malformed("cms", m);
     let ci = der::parse(cms)?;
     let mut r = ci.reader();
@@ -150,7 +156,7 @@ pub fn verify(cms: &[u8], content: &[u8]) -> Result<Verified> {
         while !ur.is_empty() {
             let a = ur.expect(tag::SEQUENCE)?;
             let mut ar = a.reader();
-            if ar.expect(tag::OID)?.value == oids::TIMESTAMP_TOKEN {
+            if ar.expect(tag::OID)?.value == timestamp_oid {
                 let token = ar.expect(tag::SET)?.reader().read()?;
                 timestamp = Some(crate::sign::timestamp::token_time(token.raw)?);
                 let info = crate::sign::timestamp::tst_info(token.raw)?;

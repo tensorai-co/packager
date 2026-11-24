@@ -3,6 +3,7 @@
 mod codesign;
 mod config;
 mod distribute;
+mod windows;
 mod toml;
 
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ IDENTITY: `-` (ad hoc, the default), a keychain identity name/SHA-1, `p12:FILE`,
 A .pkg given to `sign` gets an installer signature (use an installer identity).";
 
 fn usage() -> String {
-    USAGE_TEMPLATE.replace("{DISTRIBUTE}\n", &format!("{}\n", distribute::USAGE.split("\n\n").next().unwrap_or_default()))
+    USAGE_TEMPLATE.replace("{DISTRIBUTE}\n", &format!("{}\n{}\n", distribute::USAGE.split("\n\n").next().unwrap_or_default(), windows::USAGE))
         + "\n\n"
         + distribute::USAGE.split("\n\n").nth(1).unwrap_or_default()
 }
@@ -103,6 +104,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "staple" => distribute::staple(rest),
         "productsign" => distribute::productsign(rest),
         "assess" => distribute::run_assess(rest),
+        "rcedit" => windows::rcedit(rest),
         "--version" | "-V" | "version" => {
             println!("packager {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -123,8 +125,8 @@ fn build(args: &[String]) -> Result<(), String> {
     let only: Option<Vec<&str>> = a.value("only").map(|o| o.split(',').map(str::trim).collect());
     if let Some(o) = &only {
         for k in o {
-            if !["app", "dmg", "pkg"].contains(k) {
-                return Err(format!("--only: unknown package kind `{k}` (macOS kinds: app, dmg, pkg)"));
+            if !["app", "dmg", "pkg", "msix"].contains(k) {
+                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix)"));
             }
         }
     }
@@ -146,11 +148,18 @@ fn build(args: &[String]) -> Result<(), String> {
         b = b.package(cfg.pkg.clone().unwrap_or_default());
         any = true;
     }
+    if want("msix", cfg.msix.is_some()) {
+        b = b.package(cfg.msix.clone().unwrap_or_default());
+        any = true;
+    }
     if !any {
-        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app], or pass --only".into());
+        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix], or pass --only".into());
     }
     if let Some(apple) = cfg.apple {
         b = b.sign(apple);
+    }
+    if let Some(a) = cfg.authenticode {
+        b = b.sign(a);
     }
     if let Some(n) = cfg.notarize
         && !a.flags.iter().any(|(f, _)| *f == "no-notarize")
@@ -167,6 +176,9 @@ fn build(args: &[String]) -> Result<(), String> {
 }
 
 fn sign(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|a| !a.starts_with('-') && windows::is_pe(Path::new(a))) {
+        return windows::sign(args);
+    }
     if let Some(pkg) = args.iter().find(|a| !a.starts_with('-') && (a.ends_with(".pkg") || a.ends_with(".mpkg"))) {
         // `packager sign My.pkg -s "Developer ID Installer: …"`: an installer signature in place.
         let mut spec = None;
@@ -249,6 +261,16 @@ fn verify(args: &[String]) -> Result<(), String> {
             let ticket = if packager::staple::stapled_ticket(path).ok().flatten().is_some() { "; ticket stapled" } else { "" };
             println!("{}: valid XAR archive ({} files, checksums match), Bom lists {paths} paths, payload readable; {sig}{ticket}", path.display(), files.len());
         }
+        "msix" | "appx" => {
+            match packager::format::appx::verify(&data).map_err(e)? {
+                None => println!("{}: valid package, every file matches the block map; not signed", path.display()),
+                Some(v) => {
+                    let ts = v.cms.timestamp.map(|t| format!(", timestamped {t}")).unwrap_or_default();
+                    println!("{}: valid package, block map and signature digests match ({}{ts})", path.display(), v.cms.signer.common_name().unwrap_or("?"));
+                }
+            }
+        }
+        _ if data.starts_with(b"MZ") => return windows::verify(path),
         _ if macho::is_macho(&data) => {
             for s in verify_macho(&data).map_err(e)? {
                 println!("{}: {} valid ({}), identifier {}", path.display(), s.arch, if s.has_cms { "certificate" } else { "ad hoc" }, s.identifier);

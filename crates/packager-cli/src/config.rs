@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use packager::package::{AppBundle, Dmg, Pkg};
+use packager::package::{AppBundle, Dmg, Msix, Pkg};
 use packager::{App, Arch};
 
 use crate::toml::{self, Toml};
@@ -13,8 +13,10 @@ pub struct Config {
     pub app_bundle: AppBundle,
     pub dmg: Option<Dmg>,
     pub pkg: Option<Pkg>,
+    pub msix: Option<Msix>,
     pub app_package: bool,
     pub apple: Option<packager::sign::Apple>,
+    pub authenticode: Option<packager::sign::Authenticode>,
     pub notarize: Option<packager::notary::Notarize>,
     pub out_dir: PathBuf,
 }
@@ -191,7 +193,32 @@ pub fn load(path: &Path) -> Result<Config, String> {
             Some(x)
         }
     };
-    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none());
+    let msix = match section("msix") {
+        None => None,
+        Some(m) => {
+            check_keys(m, &["min_version", "background", "publisher", "archs", "execution_alias"], "package.msix")?;
+            let mut x = Msix::new();
+            if let Some(v) = s(m, "min_version", "package.msix")? {
+                x = x.min_version(v);
+            }
+            if let Some(v) = s(m, "background", "package.msix")? {
+                x = x.background(v);
+            }
+            if let Some(v) = s(m, "publisher", "package.msix")? {
+                x = x.publisher(v);
+            }
+            if let Some(v) = s(m, "execution_alias", "package.msix")? {
+                x = x.execution_alias(v);
+            }
+            let archs = strings(m, "archs", "package.msix")?;
+            if !archs.is_empty() {
+                let parsed: Result<Vec<Arch>, String> = archs.iter().map(|a| Arch::parse(a).ok_or_else(|| format!("unknown architecture `{a}` in package.msix.archs"))).collect();
+                x = x.archs(parsed?);
+            }
+            Some(x)
+        }
+    };
+    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none() && msix.is_none());
 
     let apple = match root.get("sign").and_then(|s| s.get("apple")) {
         None => None,
@@ -231,6 +258,38 @@ pub fn load(path: &Path) -> Result<Config, String> {
             Some(ap)
         }
     };
+    let authenticode = match root.get("sign").and_then(|s| s.get("windows")) {
+        None => None,
+        Some(sw) => {
+            check_keys(sw, &["identity", "timestamp", "digest"], "sign.windows")?;
+            let identity = s(sw, "identity", "sign.windows")?.ok_or("[sign.windows] needs `identity`")?;
+            let identity = match identity.strip_prefix("p12:") {
+                Some(p) => format!("p12:{}", rel(p).display()),
+                None => match identity.strip_prefix("pem:").and_then(|p| p.split_once(',')) {
+                    Some((c, k)) => format!("pem:{},{}", rel(c).display(), rel(k).display()),
+                    None => identity.to_string(),
+                },
+            };
+            let packager::sign::AppleIdentity::Signer(signer) = crate::codesign::identity(&identity, None)? else {
+                return Err("[sign.windows] identity can't be `-`: Authenticode needs a certificate".into());
+            };
+            let mut a = packager::sign::Authenticode::new(signer);
+            if let Some(t) = s(sw, "timestamp", "sign.windows")? {
+                if t != "none" {
+                    a = a.timestamp(t);
+                }
+            }
+            if let Some(d) = s(sw, "digest", "sign.windows")? {
+                a.digest = match d {
+                    "sha256" => packager::crypto::hmac::HashAlg::Sha256,
+                    "sha384" => packager::crypto::hmac::HashAlg::Sha384,
+                    "sha512" => packager::crypto::hmac::HashAlg::Sha512,
+                    o => return Err(format!("sign.windows.digest: unknown `{o}`")),
+                };
+            }
+            Some(a)
+        }
+    };
     let notarize = match root.get("notarize") {
         None => None,
         Some(n) => {
@@ -259,7 +318,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .transpose()?
         .flatten()
         .unwrap_or_else(|| base.join("target/dist"));
-    Ok(Config { app, app_bundle, dmg, pkg, app_package, apple, notarize, out_dir })
+    Ok(Config { app, app_bundle, dmg, pkg, msix, app_package, apple, authenticode, notarize, out_dir })
 }
 
 fn toml_to_plist(v: &Toml) -> Option<packager::format::plist::Value> {

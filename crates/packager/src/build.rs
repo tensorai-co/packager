@@ -7,13 +7,31 @@ use crate::app::App;
 use crate::error::IoContext;
 use crate::package::{AppBundle, Context, Package, PackageBuilder, PackageKind};
 use crate::notary::Notarize;
-use crate::sign::{Apple, AppleIdentity};
+use crate::sign::{Apple, AppleIdentity, Authenticode};
 use crate::Error;
 use crate::Result;
 
+/// A platform's signing configuration, for [`Builder::sign`].
+pub trait Signing {
+    /// Stores itself in the builder.
+    fn apply(self, b: &mut Builder<'_>);
+}
+
+impl Signing for Apple {
+    fn apply(self, b: &mut Builder<'_>) {
+        b.apple = Some(self);
+    }
+}
+
+impl Signing for Authenticode {
+    fn apply(self, b: &mut Builder<'_>) {
+        b.authenticode = Some(self);
+    }
+}
+
 /// Starts a build of `app`.
 pub fn build(app: &App) -> Builder<'_> {
-    Builder { app, packages: Vec::new(), apple: None, notarize: None, out_dir: PathBuf::from("target/dist"), app_bundle: AppBundle::new() }
+    Builder { app, packages: Vec::new(), apple: None, authenticode: None, notarize: None, out_dir: PathBuf::from("target/dist"), app_bundle: AppBundle::new() }
 }
 
 /// Collects packages and signing settings; [`Builder::run`] writes them.
@@ -21,6 +39,7 @@ pub struct Builder<'a> {
     app: &'a App,
     packages: Vec<Box<dyn PackageBuilder>>,
     apple: Option<Apple>,
+    authenticode: Option<Authenticode>,
     notarize: Option<Notarize>,
     out_dir: PathBuf,
     app_bundle: AppBundle,
@@ -32,10 +51,11 @@ impl<'a> Builder<'a> {
         self.packages.push(Box::new(p));
         self
     }
-    /// Apple signing for binaries, bundles and installers. Without it, macOS code is signed ad
-    /// hoc (Apple silicon won't run unsigned code).
-    pub fn sign(mut self, apple: Apple) -> Self {
-        self.apple = Some(apple);
+    /// Signing for one platform: [`Apple`] for binaries, bundles and installers (without it, macOS
+    /// code is signed ad hoc, as Apple silicon won't run unsigned code), [`Authenticode`] for
+    /// Windows executables and packages. Call once per platform.
+    pub fn sign(mut self, s: impl Signing) -> Self {
+        s.apply(&mut self);
         self
     }
     /// Notarizes and staples every macOS package after it's built and signed (needs Developer
@@ -81,6 +101,7 @@ impl<'a> Builder<'a> {
         }
         std::fs::create_dir_all(&work).at(&work)?;
         let mut ctx = Context::new(self.app, self.out_dir.clone(), work.clone(), self.apple.as_ref(), self.app_bundle.clone());
+        ctx.authenticode = self.authenticode.as_ref();
         // Bundles before containers, so a requested `.app` is reused by the `.dmg` and `.pkg`.
         let mut order: Vec<&Box<dyn PackageBuilder>> = self.packages.iter().collect();
         order.sort_by_key(|p| p.kind() != PackageKind::App);
@@ -92,7 +113,7 @@ impl<'a> Builder<'a> {
             // Containers first: their tickets cover the .app inside, so a requested .app can
             // usually be stapled without a submission of its own.
             if let Some(n) = &self.notarize {
-                let mut idx: Vec<usize> = (0..packages.len()).collect();
+                let mut idx: Vec<usize> = (0..packages.len()).filter(|&i| matches!(packages[i].kind(), PackageKind::App | PackageKind::Dmg | PackageKind::Pkg)).collect();
                 idx.sort_by_key(|&i| packages[i].kind() == PackageKind::App);
                 for i in idx {
                     n.run(packages[i].path())?;

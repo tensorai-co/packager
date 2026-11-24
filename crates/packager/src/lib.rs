@@ -28,6 +28,6 @@ pub mod transport;
 pub mod util;
 
 pub use app::{App, Arch, FileType, Version};
-pub use build::{build, Builder, Output};
+pub use build::{build, Builder, Output, Signing};
 pub use package::{Package, PackageKind};
 pub use error::{Error, Result};

@@ -6,6 +6,7 @@
 
 pub mod apple;
 pub mod assess;
+pub mod authenticode;
 pub mod bundle;
 pub mod cms;
 pub mod disk_image;
@@ -188,5 +189,41 @@ impl Apple {
             requirements: self.requirements.clone(),
             timestamp_url: self.timestamp_url(&self.application),
         }
+    }
+}
+
+/// How Windows code is signed: one identity for every `.exe`, `.dll`, `.msix` and `.msi`.
+#[derive(Clone)]
+pub struct Authenticode {
+    /// The code-signing identity (an OV/EV certificate, or Artifact Signing via a command).
+    pub signer: Arc<dyn Signer>,
+    /// RFC 3161 server (`/tr`); any public one works for Windows.
+    pub timestamp_url: Option<String>,
+    /// File digest (`/fd`).
+    pub digest: HashAlg,
+}
+
+impl std::fmt::Debug for Authenticode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Authenticode({:?}, timestamp {:?})", self.signer.leaf().and_then(|c| c.common_name()), self.timestamp_url)
+    }
+}
+
+impl Authenticode {
+    /// SHA-256 signatures with `signer`, untimestamped until [`Authenticode::timestamp`].
+    pub fn new(signer: Arc<dyn Signer>) -> Self {
+        Authenticode { signer, timestamp_url: None, digest: HashAlg::Sha256 }
+    }
+    /// Timestamps with the RFC 3161 server at `url`.
+    pub fn timestamp(mut self, url: impl Into<String>) -> Self {
+        self.timestamp_url = Some(url.into());
+        self
+    }
+    /// The library options for one signature.
+    pub fn options(&self) -> authenticode::Options<'static> {
+        let mut o = authenticode::Options::sha256();
+        o.digest = self.digest;
+        o.timestamp_url = self.timestamp_url.clone();
+        o
     }
 }

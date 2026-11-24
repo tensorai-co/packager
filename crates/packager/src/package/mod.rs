@@ -2,13 +2,16 @@
 
 pub mod app_bundle;
 pub mod dmg;
+pub mod msix;
 pub mod pkg;
+pub mod windows;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub use app_bundle::AppBundle;
 pub use dmg::Dmg;
+pub use msix::Msix;
 pub use pkg::Pkg;
 
 use crate::app::App;
@@ -26,6 +29,8 @@ pub enum PackageKind {
     Dmg,
     /// A macOS installer package.
     Pkg,
+    /// A Windows MSIX package.
+    Msix,
 }
 
 impl fmt::Display for PackageKind {
@@ -34,6 +39,7 @@ impl fmt::Display for PackageKind {
             PackageKind::App => "app",
             PackageKind::Dmg => "dmg",
             PackageKind::Pkg => "pkg",
+            PackageKind::Msix => "msix",
         })
     }
 }
@@ -117,6 +123,8 @@ pub struct Context<'a> {
     /// Apple signing, if configured. Without it, Mach-O code is still signed ad hoc, since Apple
     /// silicon won't run unsigned code.
     pub apple: Option<&'a Apple>,
+    /// Authenticode signing for Windows packages, if configured.
+    pub authenticode: Option<&'a crate::sign::Authenticode>,
     /// The `.app` settings shared by the `.dmg` and `.pkg` builders.
     pub app_bundle: AppBundle,
     built_app: Option<PathBuf>,
@@ -125,7 +133,7 @@ pub struct Context<'a> {
 impl<'a> Context<'a> {
     /// A context writing into `out_dir`, with scratch space in `work_dir`.
     pub fn new(app: &'a App, out_dir: PathBuf, work_dir: PathBuf, apple: Option<&'a Apple>, app_bundle: AppBundle) -> Self {
-        Context { app, out_dir, work_dir, apple, app_bundle, built_app: None }
+        Context { app, out_dir, work_dir, apple, authenticode: None, app_bundle, built_app: None }
     }
 
     /// The signed `.app`, built once into the scratch directory and shared by every builder.
