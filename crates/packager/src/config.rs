@@ -1,27 +1,57 @@
-//! `packager.toml` → [`App`] and package builders. The file mirrors the library one-to-one:
-//! `[app]` is `App`, `[package.<kind>]` is each builder, `[sign.apple]` is the Apple signing config.
+//! Configuration files → [`App`], package builders and signing. `packager.toml` mirrors the
+//! library one-to-one: `[app]` is `App`, `[package.<kind>]` is each builder, `[sign.apple]` and
+//! `[sign.windows]` the signing configs, `[notarize]` notarization. The same tables can live in
+//! `Cargo.toml` under `[package.metadata.packager]`, where the app's name, version, description
+//! and publisher default to the crate's and the binary to its release build.
+//!
+//! ```no_run
+//! let cfg = packager::config::load(std::path::Path::new("packager.toml"))?;
+//! for p in cfg.run(None, None, true)?.packages() {
+//!     println!("{} {}", p.kind(), p.path().display());
+//! }
+//! # Ok::<(), packager::Error>(())
+//! ```
 
 use std::path::{Path, PathBuf};
 
-use packager::package::{AppBundle, Confinement, Deb, DebCompression, Dmg, Msi, Msix, MsixBundle, Pkg, Snap};
-use packager::{App, Arch};
+use crate::build::Output;
+use crate::format::toml::{self, Toml};
+use crate::package::{AppBundle, Confinement, Deb, DebCompression, Dmg, Msi, Msix, MsixBundle, Pkg, Snap};
+use crate::{App, Arch, Error, Result};
 
-use crate::toml::{self, Toml};
+/// Package kinds as configuration files and [`Config::run`] name them.
+pub const KINDS: [&str; 8] = ["app", "dmg", "pkg", "msi", "msix", "msixbundle", "deb", "snap"];
 
+/// A loaded configuration: the app, every configured builder and the signing settings. Fields
+/// are public so tools can adjust them (add a framework, swap a signer) before [`Config::run`].
 pub struct Config {
+    /// The app.
     pub app: App,
+    /// `.app` settings, shared by the `.dmg` and `.pkg`.
     pub app_bundle: AppBundle,
+    /// `[package.dmg]`, when present.
     pub dmg: Option<Dmg>,
+    /// `[package.pkg]`, when present.
     pub pkg: Option<Pkg>,
+    /// `[package.msix]`, when present.
     pub msix: Option<Msix>,
+    /// `[package.msi]`, when present.
     pub msi: Option<Msi>,
+    /// `[package.msixbundle]`, when present.
     pub msixbundle: Option<MsixBundle>,
+    /// `[package.deb]`, when present.
     pub deb: Option<Deb>,
+    /// `[package.snap]`, when present.
     pub snap: Option<Snap>,
+    /// Whether the `.app` itself is a requested output (`[package.app]`, or nothing else configured).
     pub app_package: bool,
-    pub apple: Option<packager::sign::Apple>,
-    pub authenticode: Option<packager::sign::Authenticode>,
-    pub notarize: Option<packager::notary::Notarize>,
+    /// `[sign.apple]`.
+    pub apple: Option<crate::sign::Apple>,
+    /// `[sign.windows]`.
+    pub authenticode: Option<crate::sign::Authenticode>,
+    /// `[notarize]`.
+    pub notarize: Option<crate::notary::Notarize>,
+    /// `[build] out_dir` (default `target/dist`).
     pub out_dir: PathBuf,
 }
 
@@ -67,16 +97,102 @@ fn check_keys(t: &Toml, allowed: &[&str], ctx: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn load(path: &Path) -> Result<Config, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let root = toml::parse(&src).map_err(|e| format!("{}: {e}", path.display()))?;
-    let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let rel = |p: &str| -> PathBuf { if Path::new(p).is_absolute() { PathBuf::from(p) } else { base.join(p) } };
-    check_keys(&root, &["app", "package", "sign", "notarize", "build"], "")?;
+/// What a `Cargo.toml` supplies when `[package.metadata.packager]` leaves it out.
+#[derive(Debug, Clone, Default)]
+struct Defaults {
+    name: Option<String>,
+    version: Option<String>,
+    description: Option<String>,
+    publisher: Option<String>,
+    maintainer: Option<String>,
+    binary: Option<PathBuf>,
+    out_dir: Option<PathBuf>,
+}
 
-    let a = root.get("app").ok_or("missing [app] table")?;
+fn config_error(path: &Path, e: String) -> Error {
+    Error::Other(format!("{}: {e}", path.display()))
+}
+
+/// Loads a `packager.toml`. Relative paths in it resolve against its directory.
+pub fn load(path: &Path) -> Result<Config> {
+    let src = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+    let root = toml::parse(&src).map_err(|e| config_error(path, e))?;
+    let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    from_table(&root, &base, &Defaults::default()).map_err(|e| config_error(path, e))
+}
+
+/// Loads `[package.metadata.packager]` from a `Cargo.toml`. The app's name, version and
+/// description default to `[package]`'s (`version.workspace = true` is followed to the
+/// workspace), the publisher and `.deb` maintainer to the first of `authors`, the binary to the
+/// release build (`<target>/release/<name>`, architecture read from the file) and the output to
+/// `<target>/dist`. `identifier` has to be given.
+pub fn from_cargo_manifest(path: &Path) -> Result<Config> {
+    let src = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+    let root = toml::parse(&src).map_err(|e| config_error(path, e))?;
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let package = root.get("package").ok_or_else(|| config_error(path, "no [package] table".into()))?;
+    let name = package.get("name").and_then(Toml::as_str).map(String::from);
+    let version = match package.get("version") {
+        Some(Toml::String(v)) => Some(v.clone()),
+        Some(t) if t.get("workspace").and_then(Toml::as_bool) == Some(true) => workspace_root(&dir).and_then(|(_, ws)| ws.get("workspace")?.get("package")?.get("version")?.as_str().map(String::from)),
+        _ => None,
+    };
+    let author = package.get("authors").and_then(Toml::as_array).and_then(|a| a.first()).and_then(Toml::as_str).map(String::from);
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| workspace_root(&dir).map_or_else(|| dir.clone(), |(d, _)| d).join("target"));
+    let binary = name.as_ref().map(|n| {
+        let b = target.join("release").join(n);
+        if b.exists() || !b.with_extension("exe").exists() { b } else { b.with_extension("exe") }
+    });
+    let defaults = Defaults {
+        version,
+        description: package.get("description").and_then(Toml::as_str).map(String::from),
+        publisher: author.as_deref().map(|a| a.split('<').next().unwrap_or(a).trim().to_string()).filter(|a| !a.is_empty()),
+        maintainer: author.filter(|a| a.contains('<')),
+        binary,
+        out_dir: Some(target.join("dist")),
+        name,
+    };
+    let empty = Toml::Table(Default::default());
+    let table = root.get("package").and_then(|p| p.get("metadata")).and_then(|m| m.get("packager")).unwrap_or(&empty);
+    from_table(table, &dir, &defaults).map_err(|e| config_error(path, format!("[package.metadata.packager]: {e}")))
+}
+
+/// The nearest directory at or above `dir` whose `Cargo.toml` has a `[workspace]`, and that file.
+fn workspace_root(dir: &Path) -> Option<(PathBuf, Toml)> {
+    let start = std::fs::canonicalize(dir).ok()?;
+    for d in start.ancestors() {
+        let f = d.join("Cargo.toml");
+        if let Ok(src) = std::fs::read_to_string(&f)
+            && let Ok(t) = toml::parse(&src)
+            && t.get("workspace").is_some()
+        {
+            return Some((d.to_path_buf(), t));
+        }
+    }
+    None
+}
+
+fn from_table(root: &Toml, base: &Path, defaults: &Defaults) -> Result<Config, String> {
+    let base = base.to_path_buf();
+    let rel = |p: &str| -> PathBuf { if Path::new(p).is_absolute() { PathBuf::from(p) } else { base.join(p) } };
+    check_keys(root, &["app", "package", "sign", "notarize", "build"], "")?;
+
+    let no_app = Toml::Table(Default::default());
+    let a = match root.get("app") {
+        Some(a) => a,
+        None if defaults.name.is_some() => &no_app,
+        None => return Err("missing [app] table".into()),
+    };
     check_keys(a, &["name", "identifier", "version", "build_number", "publisher", "description", "copyright", "executable", "icon", "binaries", "resources", "url_schemes", "file_types"], "app")?;
-    let mut app = App::new(req(a, "name", "app")?, req(a, "identifier", "app")?, req(a, "version", "app")?);
+    let name = s(a, "name", "app")?.map(String::from).or_else(|| defaults.name.clone()).ok_or("`app.name` is required")?;
+    let version = s(a, "version", "app")?.map(String::from).or_else(|| defaults.version.clone()).ok_or("`app.version` is required")?;
+    let mut app = App::new(name, req(a, "identifier", "app")?, version);
+    if let Some(d) = &defaults.description {
+        app = app.description(d.clone());
+    }
+    if let Some(p) = &defaults.publisher {
+        app = app.publisher(p.clone());
+    }
     if let Some(v) = s(a, "build_number", "app")? {
         app = app.build_number(v);
     }
@@ -95,12 +211,26 @@ pub fn load(path: &Path) -> Result<Config, String> {
     if let Some(v) = s(a, "icon", "app")? {
         app = app.icon(rel(v));
     }
-    if let Some(b) = a.get("binaries") {
-        let t = b.as_table().ok_or("`app.binaries` must be a table of arch = path")?;
-        for (arch, p) in t {
-            let arch_v = Arch::parse(arch).ok_or_else(|| format!("unknown architecture `{arch}` in app.binaries"))?;
-            let p = p.as_str().ok_or_else(|| format!("`app.binaries.{arch}` must be a path"))?;
-            app = app.binary(arch_v, rel(p));
+    match a.get("binaries") {
+        Some(Toml::Table(t)) => {
+            for (arch, p) in t {
+                let arch_v = Arch::parse(arch).ok_or_else(|| format!("unknown architecture `{arch}` in app.binaries"))?;
+                let p = p.as_str().ok_or_else(|| format!("`app.binaries.{arch}` must be a path"))?;
+                app = app.binary(arch_v, rel(p));
+            }
+        }
+        // A list of paths: each file's architecture is read from it.
+        Some(Toml::Array(list)) => {
+            for p in list {
+                let p = p.as_str().ok_or("`app.binaries` must hold paths")?;
+                app = app.binary_file(rel(p)).map_err(|e| e.to_string())?;
+            }
+        }
+        Some(_) => return Err("`app.binaries` must be a table of arch = path, or a list of paths".into()),
+        None => {
+            if let Some(b) = defaults.binary.as_ref().filter(|b| b.exists()) {
+                app = app.binary_file(b).map_err(|e| e.to_string())?;
+            }
         }
     }
     if let Some(r) = a.get("resources") {
@@ -311,7 +441,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
             if let Some(v) = s(d, "revision", ctx)? {
                 x = x.revision(v);
             }
-            if let Some(v) = s(d, "maintainer", ctx)? {
+            if let Some(v) = s(d, "maintainer", ctx)?.map(String::from).or_else(|| defaults.maintainer.clone()) {
                 x = x.maintainer(v);
             }
             x = x.depends(strings(d, "depends", ctx)?).recommends(strings(d, "recommends", ctx)?);
@@ -439,23 +569,27 @@ pub fn load(path: &Path) -> Result<Config, String> {
                 },
             };
             let identity = spec(s(sa, "identity", "sign.apple")?.unwrap_or("-"));
-            let mut ap = packager::sign::Apple::ad_hoc();
-            ap.application = crate::codesign::identity(&identity, None)?;
+            let mut ap = crate::sign::Apple::ad_hoc();
+            ap.application = crate::sign::identity(&identity, None).map_err(|e| e.to_string())?;
             if let Some(i) = s(sa, "installer_identity", "sign.apple")? {
-                ap.installer = Some(crate::codesign::identity(&spec(i), None)?);
+                ap.installer = Some(crate::sign::identity(&spec(i), None).map_err(|e| e.to_string())?);
             }
             if sa.get("hardened_runtime").and_then(Toml::as_bool) == Some(true) {
                 ap = ap.hardened_runtime();
             }
-            if let Some(e) = s(sa, "entitlements", "sign.apple")? {
-                ap = ap.entitlements(rel(e)).map_err(|e| e.to_string())?;
+            // A plist file, or the entitlements inline: `entitlements = { "com.apple.security.cs.allow-jit" = true }`.
+            match sa.get("entitlements") {
+                None => {}
+                Some(Toml::String(e)) => ap = ap.entitlements(rel(e)).map_err(|e| e.to_string())?,
+                Some(t @ Toml::Table(_)) => ap = ap.entitlements_xml(toml_to_plist(t).ok_or("`sign.apple.entitlements` has an unsupported value")?.to_xml()),
+                Some(_) => return Err("`sign.apple.entitlements` must be a plist path or a table".into()),
             }
             if let Some(t) = s(sa, "timestamp", "sign.apple")? {
                 ap = ap.timestamp(match t {
-                    "auto" => packager::sign::Timestamp::Auto,
-                    "none" => packager::sign::Timestamp::None,
-                    "apple" => packager::sign::Timestamp::Apple,
-                    url => packager::sign::Timestamp::Url(url.to_string()),
+                    "auto" => crate::sign::Timestamp::Auto,
+                    "none" => crate::sign::Timestamp::None,
+                    "apple" => crate::sign::Timestamp::Apple,
+                    url => crate::sign::Timestamp::Url(url.to_string()),
                 });
             }
             if let Some(r) = s(sa, "requirements", "sign.apple")? {
@@ -476,10 +610,10 @@ pub fn load(path: &Path) -> Result<Config, String> {
                     None => identity.to_string(),
                 },
             };
-            let packager::sign::AppleIdentity::Signer(signer) = crate::codesign::identity(&identity, None)? else {
+            let crate::sign::AppleIdentity::Signer(signer) = crate::sign::identity(&identity, None).map_err(|e| e.to_string())? else {
                 return Err("[sign.windows] identity can't be `-`: Authenticode needs a certificate".into());
             };
-            let mut a = packager::sign::Authenticode::new(signer);
+            let mut a = crate::sign::Authenticode::new(signer);
             if let Some(t) = s(sw, "timestamp", "sign.windows")?
                 && t != "none"
             {
@@ -487,9 +621,9 @@ pub fn load(path: &Path) -> Result<Config, String> {
             }
             if let Some(d) = s(sw, "digest", "sign.windows")? {
                 a.digest = match d {
-                    "sha256" => packager::crypto::hmac::HashAlg::Sha256,
-                    "sha384" => packager::crypto::hmac::HashAlg::Sha384,
-                    "sha512" => packager::crypto::hmac::HashAlg::Sha512,
+                    "sha256" => crate::crypto::hmac::HashAlg::Sha256,
+                    "sha384" => crate::crypto::hmac::HashAlg::Sha384,
+                    "sha512" => crate::crypto::hmac::HashAlg::Sha512,
                     o => return Err(format!("sign.windows.digest: unknown `{o}`")),
                 };
             }
@@ -504,8 +638,8 @@ pub fn load(path: &Path) -> Result<Config, String> {
             let key_id = std::env::var("PACKAGER_NOTARY_KEY_ID").ok().or(s(n, "key_id", "notarize")?.map(String::from));
             let issuer = std::env::var("PACKAGER_NOTARY_ISSUER").ok().or(s(n, "issuer", "notarize")?.map(String::from));
             let key = key.ok_or("[notarize] needs `key` (an AuthKey_<ID>.p8 file) or PACKAGER_NOTARY_KEY")?;
-            let api = packager::notary::ApiKey::from_file(&key, key_id.as_deref(), issuer.as_deref()).map_err(|e| e.to_string())?;
-            let mut nz = packager::notary::Notarize::new(api);
+            let api = crate::notary::ApiKey::from_file(&key, key_id.as_deref(), issuer.as_deref()).map_err(|e| e.to_string())?;
+            let mut nz = crate::notary::Notarize::new(api);
             if let Some(m) = n.get("timeout_minutes").and_then(Toml::as_int) {
                 nz.timeout = std::time::Duration::from_secs(m.max(1) as u64 * 60);
             }
@@ -523,12 +657,79 @@ pub fn load(path: &Path) -> Result<Config, String> {
         })
         .transpose()?
         .flatten()
+        .or_else(|| defaults.out_dir.clone())
         .unwrap_or_else(|| base.join("target/dist"));
     Ok(Config { app, app_bundle, dmg, pkg, msix, msi, msixbundle, deb, snap, app_package, apple, authenticode, notarize, out_dir })
 }
 
-fn toml_to_plist(v: &Toml) -> Option<packager::format::plist::Value> {
-    use packager::format::plist::{Dict, Value};
+impl Config {
+    /// Builds the configured packages, or only the kinds in `only` (see [`KINDS`]), into
+    /// `out_dir` (default: the configured one). Notarizes when `[notarize]` is set and `notarize`
+    /// is true.
+    pub fn run(self, only: Option<&[&str]>, out_dir: Option<&Path>, notarize: bool) -> Result<Output> {
+        if let Some(o) = only {
+            for k in o {
+                if !KINDS.contains(k) {
+                    return Err(Error::invalid("config", "only", format!("unknown package kind `{k}` ({})", KINDS.join(", "))));
+                }
+            }
+        }
+        let want = |k: &str, configured: bool| only.map_or(configured, |o| o.contains(&k));
+        let Config { app, app_bundle, dmg, pkg, msix, msi, msixbundle, deb, snap, app_package, apple, authenticode, notarize: nz, out_dir: configured_out } = self;
+        let mut b = crate::build(&app).app_bundle(app_bundle.clone()).out_dir(out_dir.map(Path::to_path_buf).unwrap_or(configured_out));
+        let mut any = false;
+        if want("app", app_package) {
+            b = b.package(app_bundle);
+            any = true;
+        }
+        if want("dmg", dmg.is_some()) {
+            b = b.package(dmg.unwrap_or_default());
+            any = true;
+        }
+        if want("pkg", pkg.is_some()) {
+            b = b.package(pkg.unwrap_or_default());
+            any = true;
+        }
+        if want("msix", msix.is_some()) {
+            b = b.package(msix.clone().unwrap_or_default());
+            any = true;
+        }
+        if want("msixbundle", msixbundle.is_some()) {
+            b = b.package(msixbundle.unwrap_or_else(MsixBundle::all));
+            any = true;
+        }
+        if want("msi", msi.is_some()) {
+            b = b.package(msi.unwrap_or_default());
+            any = true;
+        }
+        if want("deb", deb.is_some()) {
+            b = b.package(deb.unwrap_or_default());
+            any = true;
+        }
+        if want("snap", snap.is_some()) {
+            b = b.package(snap.unwrap_or_default());
+            any = true;
+        }
+        if !any {
+            return Err(Error::Other("nothing to build: add a [package.<kind>] table (app, dmg, pkg, msi, msix, msixbundle, deb, snap), or name the kinds".into()));
+        }
+        if let Some(a) = apple {
+            b = b.sign(a);
+        }
+        if let Some(a) = authenticode {
+            b = b.sign(a);
+        }
+        if let Some(n) = nz
+            && notarize
+        {
+            b = b.notarize(n);
+        }
+        b.run()
+    }
+}
+
+fn toml_to_plist(v: &Toml) -> Option<crate::format::plist::Value> {
+    use crate::format::plist::{Dict, Value};
     Some(match v {
         Toml::String(s) => Value::String(s.clone()),
         Toml::Integer(i) => Value::Integer(*i),
@@ -543,4 +744,53 @@ fn toml_to_plist(v: &Toml) -> Option<packager::format::plist::Value> {
             Value::Dict(d)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_config_loads() {
+        let cfg = load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packager.example.toml")).unwrap();
+        assert_eq!(cfg.app.identifier, "com.example.myapp");
+        assert!(cfg.dmg.is_some() && cfg.msi.is_some() && cfg.deb.is_some() && cfg.snap.is_some());
+        assert!(cfg.app.binaries.iter().any(|(a, _)| *a == Arch::LinuxX64));
+    }
+
+    #[test]
+    fn inline_entitlements() {
+        let root = toml::parse("[app]\nname = \"A\"\nidentifier = \"com.example.a\"\nversion = \"1.0.0\"\n[sign.apple.entitlements]\n\"com.apple.security.cs.allow-jit\" = true\n").unwrap();
+        let cfg = from_table(&root, Path::new("."), &Defaults::default()).unwrap();
+        let xml = String::from_utf8(cfg.apple.unwrap().entitlements.unwrap()).unwrap();
+        assert!(xml.contains("<key>com.apple.security.cs.allow-jit</key>") && xml.contains("<true/>"), "{xml}");
+    }
+
+    #[test]
+    fn cargo_manifest_defaults() {
+        let root = std::env::temp_dir().join(format!("packager-cargo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let member = root.join("apps/notes");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::create_dir_all(root.join("target/release")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"apps/notes\"]\n[workspace.package]\nversion = \"2.3.4\"\n").unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"notes\"\nversion.workspace = true\ndescription = \"Takes notes.\"\nauthors = [\"Example Ltd <dev@example.com>\"]\n\n\
+             [package.metadata.packager.app]\nidentifier = \"com.example.notes\"\nurl_schemes = [\"notes\"]\n\n[package.metadata.packager.package.deb]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("target/release/notes"), crate::format::elf::tests::stub(crate::format::elf::machine::X86_64)).unwrap();
+        let cfg = from_cargo_manifest(&member.join("Cargo.toml")).unwrap();
+        assert_eq!((cfg.app.name.as_str(), cfg.app.version.as_str()), ("notes", "2.3.4"));
+        assert_eq!(cfg.app.description.as_deref(), Some("Takes notes."));
+        assert_eq!(cfg.app.publisher.as_deref(), Some("Example Ltd"));
+        assert_eq!(cfg.app.binaries, [(Arch::LinuxX64, std::fs::canonicalize(&root).unwrap().join("target/release/notes"))]);
+        assert_eq!(cfg.app.url_schemes, ["notes"]);
+        assert!(cfg.deb.is_some() && cfg.out_dir.ends_with("target/dist"));
+        // `identifier` is required.
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"notes\"\nversion = \"1.0.0\"\n").unwrap();
+        assert!(from_cargo_manifest(&member.join("Cargo.toml")).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

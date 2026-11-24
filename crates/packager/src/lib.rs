@@ -36,8 +36,10 @@
 pub mod app;
 mod build;
 pub mod compress;
+pub mod config;
 pub mod crypto;
 mod error;
+pub mod feed;
 pub mod format;
 pub mod identity;
 pub mod image;

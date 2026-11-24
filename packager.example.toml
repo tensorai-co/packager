@@ -84,6 +84,7 @@ identity = "-"
 # installer_identity = "Developer ID Installer"   # signs the .pkg (productsign)
 hardened_runtime = true
 # entitlements = "app.entitlements"
+# entitlements = { "com.apple.security.cs.allow-jit" = true }   # or inline
 # timestamp = "auto"               # auto (Developer ID only, like codesign), apple, none, or a URL
 # requirements = 'designated => identifier "com.example.myapp" and anchor apple generic'
 

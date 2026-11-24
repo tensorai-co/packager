@@ -21,6 +21,7 @@ pub mod plist;
 pub mod png;
 pub mod squashfs;
 pub mod tar;
+pub mod toml;
 pub mod udif;
 pub mod xar;
 pub mod xml;

@@ -20,6 +20,7 @@ pub struct AppBundle {
     min_macos: String,
     category: Option<String>,
     frameworks: Vec<PathBuf>,
+    helpers: Vec<(PathBuf, Option<String>)>,
     extra: Dict,
 }
 
@@ -32,7 +33,7 @@ impl Default for AppBundle {
 impl AppBundle {
     /// Defaults: macOS 11 minimum, no category, no frameworks.
     pub fn new() -> Self {
-        AppBundle { min_macos: "11.0".into(), category: None, frameworks: Vec::new(), extra: Dict::new() }
+        AppBundle { min_macos: "11.0".into(), category: None, frameworks: Vec::new(), helpers: Vec::new(), extra: Dict::new() }
     }
     /// `LSMinimumSystemVersion`.
     pub fn min_macos(mut self, v: impl Into<String>) -> Self {
@@ -47,6 +48,13 @@ impl AppBundle {
     /// A framework (or dylib) copied into `Contents/Frameworks`, symlinks preserved.
     pub fn framework(mut self, path: impl Into<PathBuf>) -> Self {
         self.frameworks.push(path.into());
+        self
+    }
+    /// A helper app copied into `Contents/Frameworks` (how Chromium-based apps ship their
+    /// GPU, renderer and plug-in processes), with its `CFBundleIdentifier` set to `identifier`
+    /// when given. Helpers are signed before the app, like every nested bundle.
+    pub fn helper(mut self, app: impl Into<PathBuf>, identifier: Option<String>) -> Self {
+        self.helpers.push((app.into(), identifier));
         self
     }
     /// An extra `Info.plist` key, overriding the generated one.
@@ -206,6 +214,19 @@ impl AppBundle {
             for f in &self.frameworks {
                 let name = f.file_name().ok_or_else(|| Error::invalid("app", "framework", "path has no file name"))?;
                 copy_tree(f, &fw.join(name))?;
+            }
+        }
+
+        for (src, id) in &self.helpers {
+            let name = src.file_name().ok_or_else(|| Error::invalid("app", "helper", "path has no file name"))?;
+            let dst = contents.join("Frameworks").join(name);
+            copy_tree(src, &dst)?;
+            if let Some(id) = id {
+                let plist = dst.join("Contents/Info.plist");
+                let mut v = Value::parse(&std::fs::read(&plist).at(&plist)?)?;
+                let d = v.as_dict_mut().ok_or_else(|| Error::malformed("plist", format!("{}: not a dictionary", plist.display())))?;
+                d.insert("CFBundleIdentifier", id.as_str());
+                std::fs::write(&plist, v.to_xml()).at(&plist)?;
             }
         }
 

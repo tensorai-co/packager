@@ -1,9 +1,7 @@
 //! `packager`: parses arguments and `packager.toml`, then calls the library's public API.
 
 mod codesign;
-mod config;
 mod distribute;
-mod toml;
 mod windows;
 
 use std::path::{Path, PathBuf};
@@ -17,7 +15,7 @@ const USAGE_TEMPLATE: &str = "\
 packager — native macOS, Windows and Linux packages from scratch, no platform tools needed
 
 USAGE:
-    packager build [--config packager.toml] [--only app,dmg,pkg,msi,msix,msixbundle,deb,snap] [--out DIR]
+    packager build [--config packager.toml|Cargo.toml] [--only app,dmg,pkg,msi,msix,msixbundle,deb,snap] [--out DIR]
     packager sign <file|bundle>... [-s IDENTITY | --p12 FILE | --cert FILE --key FILE]
                   [-i ID] [--hardened-runtime] [--entitlements FILE] [-r REQS] [--timestamp[=URL|none]]
     packager codesign …                codesign's own command line (sign, -v verify, -d display)
@@ -26,6 +24,8 @@ USAGE:
     packager verify <file|bundle>      signatures and structure, without native tools
     packager inspect <file|bundle>     what's inside a .dmg, .pkg, .app, .deb, .snap, Mach-O or ELF file
     packager icns <icon.png> <out.icns>
+    packager update-key [--out DIR]    a P-256 key for signed update feeds, and its public key
+    packager update-feed <key.pem> <version> <url> [notes] > feed.json
     packager --version
 
 IDENTITY: `-` (ad hoc, the default), a keychain identity name/SHA-1, `p12:FILE`, `pem:CERT,KEY`.
@@ -105,6 +105,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "productsign" => distribute::productsign(rest),
         "assess" => distribute::run_assess(rest),
         "rcedit" => windows::rcedit(rest),
+        "update-key" => update_key(rest),
+        "update-feed" => update_feed(rest),
         "--version" | "-V" | "version" => {
             println!("packager {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -120,72 +122,19 @@ fn run(args: &[String]) -> Result<(), String> {
 fn build(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["config", "only", "out"])?;
     a.check(&["config", "only", "out", "no-notarize"])?;
-    let cfg_path = PathBuf::from(a.value("config").unwrap_or("packager.toml"));
-    let cfg = config::load(&cfg_path)?;
-    let only: Option<Vec<&str>> = a.value("only").map(|o| o.split(',').map(str::trim).collect());
-    if let Some(o) = &only {
-        for k in o {
-            if !["app", "dmg", "pkg", "msix", "msixbundle", "msi", "deb", "snap"].contains(k) {
-                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix, msixbundle, msi, deb, snap)"));
-            }
-        }
-    }
-    let want = |k: &str, configured: bool| match &only {
-        Some(o) => o.contains(&k),
-        None => configured,
+    // packager.toml, else [package.metadata.packager] in Cargo.toml.
+    let cfg_path = match a.value("config") {
+        Some(p) => PathBuf::from(p),
+        None if !Path::new("packager.toml").exists() && Path::new("Cargo.toml").exists() => PathBuf::from("Cargo.toml"),
+        None => PathBuf::from("packager.toml"),
     };
-    let mut b = packager::build(&cfg.app).app_bundle(cfg.app_bundle.clone()).out_dir(a.value("out").map(PathBuf::from).unwrap_or(cfg.out_dir));
-    let mut any = false;
-    if want("app", cfg.app_package) {
-        b = b.package(cfg.app_bundle.clone());
-        any = true;
-    }
-    if want("dmg", cfg.dmg.is_some()) {
-        b = b.package(cfg.dmg.clone().unwrap_or_default());
-        any = true;
-    }
-    if want("pkg", cfg.pkg.is_some()) {
-        b = b.package(cfg.pkg.clone().unwrap_or_default());
-        any = true;
-    }
-    if want("msix", cfg.msix.is_some()) {
-        b = b.package(cfg.msix.clone().unwrap_or_default());
-        any = true;
-    }
-    if want("msixbundle", cfg.msixbundle.is_some()) {
-        b = b.package(cfg.msixbundle.clone().unwrap_or_else(packager::package::MsixBundle::all));
-        any = true;
-    }
-    if want("msi", cfg.msi.is_some()) {
-        b = b.package(cfg.msi.clone().unwrap_or_default());
-        any = true;
-    }
-    if want("deb", cfg.deb.is_some()) {
-        b = b.package(cfg.deb.clone().unwrap_or_default());
-        any = true;
-    }
-    if want("snap", cfg.snap.is_some()) {
-        b = b.package(cfg.snap.clone().unwrap_or_default());
-        any = true;
-    }
-    if !any {
-        return Err(
-            "nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msixbundle] / [package.msi] / [package.deb] / [package.snap], or pass --only".into()
-        );
-    }
-    if let Some(apple) = cfg.apple {
-        b = b.sign(apple);
-    }
-    if let Some(a) = cfg.authenticode {
-        b = b.sign(a);
-    }
-    if let Some(n) = cfg.notarize
-        && !a.flags.iter().any(|(f, _)| *f == "no-notarize")
-    {
+    let cfg = if cfg_path.file_name().is_some_and(|n| n == "Cargo.toml") { packager::config::from_cargo_manifest(&cfg_path) } else { packager::config::load(&cfg_path) }.map_err(|e| e.to_string())?;
+    let only: Option<Vec<&str>> = a.value("only").map(|o| o.split(',').map(str::trim).collect());
+    let notarize = !a.flags.iter().any(|(f, _)| *f == "no-notarize");
+    if cfg.notarize.is_some() && notarize {
         eprintln!("notarizing after the build (pass --no-notarize to skip)…");
-        b = b.notarize(n);
     }
-    let out = b.run().map_err(|e| e.to_string())?;
+    let out = cfg.run(only.as_deref(), a.value("out").map(Path::new), notarize).map_err(|e| e.to_string())?;
     for p in out.packages() {
         let tag = if p.notarized() {
             "notarized"
@@ -477,5 +426,27 @@ fn icns(args: &[String]) -> Result<(), String> {
     let data = packager::image::icns_from_png(src).map_err(|e| e.to_string())?;
     std::fs::write(dst, data).map_err(|e| format!("{dst}: {e}"))?;
     println!("wrote {dst}");
+    Ok(())
+}
+
+fn update_key(args: &[String]) -> Result<(), String> {
+    let a = Args::parse(args, &["out"])?;
+    a.check(&["out"])?;
+    let dir = PathBuf::from(a.value("out").unwrap_or("."));
+    let (path, public) = packager::feed::write_key(&dir).map_err(|e| e.to_string())?;
+    println!("Private key: {} (keep it secret; don't commit it)", path.display());
+    println!("Public key for the app:\n{public}");
+    Ok(())
+}
+
+fn update_feed(args: &[String]) -> Result<(), String> {
+    let a = Args::parse(args, &[])?;
+    a.check(&[])?;
+    let (key, version, url) = match a.positional[..] {
+        [k, v, u] | [k, v, u, _] => (k, v, u),
+        _ => return Err("usage: packager update-feed <key.pem> <version> <url> [notes]".into()),
+    };
+    let pem = std::fs::read_to_string(key).map_err(|e| format!("{key}: {e}"))?;
+    print!("{}", packager::feed::sign(&pem, version, url, a.positional.get(3).copied()).map_err(|e| e.to_string())?);
     Ok(())
 }

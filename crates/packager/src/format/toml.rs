@@ -1,50 +1,63 @@
-//! A TOML reader covering what `packager.toml` uses: tables, arrays of tables, dotted and quoted
-//! keys, strings (basic, literal, multi-line), integers, floats, booleans, arrays and inline tables.
+//! A TOML reader covering what `packager.toml` and `Cargo.toml` use: tables, arrays of tables,
+//! dotted and quoted keys, strings (basic, literal, multi-line), integers, floats, booleans,
+//! arrays and inline tables. Dates aren't supported.
 
 use std::collections::BTreeMap;
 
 /// A TOML value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Toml {
+    /// A string.
     String(String),
+    /// An integer.
     Integer(i64),
+    /// A float.
     Float(f64),
+    /// A boolean.
     Bool(bool),
+    /// An array.
     Array(Vec<Toml>),
+    /// A table (also an inline table), keys sorted.
     Table(BTreeMap<String, Toml>),
 }
 
 impl Toml {
+    /// A table's value for `key`.
     pub fn get(&self, key: &str) -> Option<&Toml> {
         match self {
             Toml::Table(t) => t.get(key),
             _ => None,
         }
     }
+    /// The string, if this is one.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Toml::String(s) => Some(s),
             _ => None,
         }
     }
+    /// The integer, if this is one.
     pub fn as_int(&self) -> Option<i64> {
         match self {
             Toml::Integer(i) => Some(*i),
             _ => None,
         }
     }
+    /// The boolean, if this is one.
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Toml::Bool(b) => Some(*b),
             _ => None,
         }
     }
+    /// The array, if this is one.
     pub fn as_array(&self) -> Option<&[Toml]> {
         match self {
             Toml::Array(a) => Some(a),
             _ => None,
         }
     }
+    /// The table, if this is one.
     pub fn as_table(&self) -> Option<&BTreeMap<String, Toml>> {
         match self {
             Toml::Table(t) => Some(t),
@@ -339,6 +352,7 @@ fn table_at<'a>(root: &'a mut BTreeMap<String, Toml>, path: &[String]) -> Result
     Ok(cur)
 }
 
+/// Parses a document into its root table; errors name the line.
 pub fn parse(src: &str) -> Result<Toml, String> {
     let mut p = P { s: src.as_bytes(), i: 0, line: 1 };
     let mut root = BTreeMap::new();

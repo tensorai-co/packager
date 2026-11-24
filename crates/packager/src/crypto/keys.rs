@@ -161,6 +161,12 @@ impl PrivateKey {
         }
     }
 
+    /// PEM of the unencrypted PKCS#8 encoding (`-----BEGIN PRIVATE KEY-----`), what `openssl`
+    /// writes and [`PrivateKey::from_pem`] reads.
+    pub fn to_pem(&self) -> String {
+        pem_encode("PRIVATE KEY", &self.to_pkcs8())
+    }
+
     /// Signs a precomputed digest. RSA gives PKCS#1 v1.5, ECDSA a DER `Ecdsa-Sig-Value`.
     pub fn sign(&self, alg: HashAlg, digest: &[u8]) -> Result<Vec<u8>> {
         match self {

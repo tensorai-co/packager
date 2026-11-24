@@ -93,8 +93,10 @@ maintainer = "Example Ltd <packages@example.com>"
 [package.snap]
 ```
 
+The same tables can live in a crate's `Cargo.toml` under `[package.metadata.packager]`. There, the name, version (workspace versions included), description and publisher default to the crate's, and the binary defaults to its release build. `packager build` uses it when there's no `packager.toml`, and tools load either through `packager::config`.
+
 ```sh
-packager build                          # every package in packager.toml
+packager build                          # every package in packager.toml (or Cargo.toml)
 packager build --only dmg,deb --out dist
 packager verify dist/myapp_1.4.0_amd64.deb
 ```
@@ -107,7 +109,7 @@ Output is deterministic: the same input gives byte-identical packages. Timestamp
 
 | Package | What's written | Checked against |
 | :--- | :--- | :--- |
-| **`.app`** | `Info.plist`, universal binary merged from per-arch inputs, `.icns` from one PNG, resources, frameworks, a signature on every Mach-O and a sealed `CodeResources` | `codesign --verify --deep --strict`, `plutil -lint`, `lipo`, running it |
+| **`.app`** | `Info.plist`, universal binary merged from per-arch inputs, `.icns` from one PNG, resources, frameworks and helper apps (Chromium-style, with their own identifiers), a signature on every Mach-O and a sealed `CodeResources` | `codesign --verify --deep --strict`, `plutil -lint`, `lipo`, running it |
 | **`.dmg`** | HFSX volume (catalog B-tree, NFD names), `Applications` link, volume icon, optional background and Finder layout (`.DS_Store` + alias), UDZO image, image signature | `hdiutil verify`, `fsck_hfs`, mounting, `codesign --verify`, Finder |
 | **`.pkg`** | Flat package: XAR with `Distribution`, `PackageInfo` (not relocatable), `Bom`, gzip'd cpio payload, scripts; installer signature | `installer`, `pkgutil --check-signature`, `lsbom`, `sudo installer -pkg` |
 | **`.msi`** | Compound File, installer database with `_Validation`, MSZIP cabinets (split at 1 GiB), one component per file, Start menu shortcut, URL schemes and file types, major upgrades with a downgrade block, per-machine or per-user, optional wizard; Authenticode with `MsiDigitalSignatureEx` | ICE validation (no errors or warnings), Windows Installer's COM API, `Get-AuthenticodeSignature`, `msiexec` install / upgrade / downgrade / uninstall |
@@ -148,6 +150,8 @@ packager rcedit my-app.exe --icon icon.png --version 1.4.0 --set CompanyName="Ex
 packager sign my-app.exe -s p12:codesign.pfx --timestamp http://timestamp.digicert.com
 ```
 
+**Update feeds:** `packager update-key` makes a P-256 key, and `packager update-feed` writes a JSON feed whose signature an app checks with the embedded public key, as `ui::update::check` does.
+
 **Linux:** packages aren't signed as files. Debian signs repositories, and the Snap Store signs what's uploaded. Install a local snap with `snap install --dangerous`.
 
 ---
@@ -164,6 +168,8 @@ packager identities                  code-signing identities in the keychain (ma
 packager notarize | staple | productsign | assess …
 packager rcedit <file.exe> …
 packager icns <icon.png> <out.icns>
+packager update-key [--out DIR]      a P-256 key for signed update feeds, and its public key
+packager update-feed <key.pem> <version> <url> [notes] > feed.json
 ```
 
 Identities are written as `-` (ad hoc), a keychain identity name or SHA-1, `p12:FILE` or `pem:CERT,KEY`.
@@ -176,14 +182,16 @@ Identities are written as `-` (ad hoc), a keychain identity name or SHA-1, `p12:
 packager
 ├── app        // App, Arch, Version, FileType: the platform-neutral description
 ├── build      // build(&app) → Builder: validation, signing order, outputs
+├── config     // packager.toml / [package.metadata.packager] → Config, Config::run
 ├── identity   // derived MSI codes; package names and versions per format
 ├── package    // AppBundle, Dmg, Pkg, Msi, Msix, MsixBundle, Deb, Snap
 ├── sign       // Signer, KeySigner, Apple, Authenticode, requirements, installer and disk-image signatures
 ├── notary     // Notary API client and preflight
 ├── staple     // ticket lookup, stapling and validation
+├── feed       // signed update feeds: P-256 keys, signing and verification
 ├── image      // RGBA images, Lanczos resizing, .icns and .ico from one PNG
 ├── format     // plist, PNG, ICNS, ICO, Mach-O, PE, ELF, cpio, XAR, Bom, HFS+, UDIF, .DS_Store,
-│              // ZIP, CAB, Compound File, MSI database, APPX, tar, ar, SquashFS, XML, JSON
+│              // ZIP, CAB, Compound File, MSI database, APPX, tar, ar, SquashFS, XML, JSON, TOML
 ├── compress   // DEFLATE, zlib, gzip, LZMA2, xz
 ├── crypto     // SHA-1/2, MD5, HMAC, RSA, ECDSA, DER, X.509, PKCS#8/#12, AES, 3DES, RC2, SigV4
 └── transport  // Transport trait for HTTPS (the default uses the system curl)

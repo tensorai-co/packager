@@ -3,7 +3,6 @@
 //! switch over without changing their arguments. `packager sign` is the same signer.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use packager::crypto::x509::Certificate;
 use packager::format::macho;
@@ -12,7 +11,7 @@ use packager::sign::apple::{CS_ADHOC, CS_RUNTIME, CodeSignOptions, SliceSignatur
 use packager::sign::bundle::{BundleSignOptions, sign_bundle, verify_bundle};
 use packager::sign::disk_image::{DiskImageSignOptions, sign_disk_image, verify_disk_image};
 use packager::sign::requirement::{self, RequirementType};
-use packager::sign::{AppleIdentity, KeySigner, Signer, timestamp};
+use packager::sign::{AppleIdentity, timestamp};
 
 pub const CODESIGN_USAGE: &str = "\
 packager codesign — the codesign command line, implemented by packager
@@ -138,29 +137,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 
 /// Resolves an identity argument to a signer (`-` is ad hoc).
 pub fn identity(spec: &str, password: Option<&str>) -> Result<AppleIdentity, String> {
-    if spec == "-" || spec == "adhoc" {
-        return Ok(AppleIdentity::AdHoc);
-    }
-    let pw = password.map(String::from).or_else(|| std::env::var("PACKAGER_P12_PASSWORD").ok());
-    let signer: Arc<dyn Signer> = if let Some(p12) = spec.strip_prefix("p12:") {
-        KeySigner::pkcs12(p12, pw.as_deref().unwrap_or("")).map_err(|e| e.to_string())?.complete_chain(&packager::transport::Curl).map_err(|e| e.to_string())?.into_arc()
-    } else if let Some(pem) = spec.strip_prefix("pem:") {
-        let (cert, key) = pem.split_once(',').ok_or("pem:CERT,KEY needs both files")?;
-        KeySigner::pem(cert, key, pw.as_deref()).map_err(|e| e.to_string())?.complete_chain(&packager::transport::Curl).map_err(|e| e.to_string())?.into_arc()
-    } else {
-        keychain(spec)?
-    };
-    Ok(AppleIdentity::Signer(signer))
-}
-
-#[cfg(target_os = "macos")]
-fn keychain(spec: &str) -> Result<Arc<dyn Signer>, String> {
-    Ok(Arc::new(packager::sign::keychain::KeychainSigner::find(spec).map_err(|e| e.to_string())?))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn keychain(spec: &str) -> Result<Arc<dyn Signer>, String> {
-    Err(format!("{spec}: keychain identities need macOS; use p12:FILE or pem:CERT,KEY"))
+    packager::sign::identity(spec, password).map_err(|e| e.to_string())
 }
 
 fn requirement_text(r: &str) -> Result<String, String> {

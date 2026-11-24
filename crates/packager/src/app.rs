@@ -45,6 +45,47 @@ impl Arch {
             Arch::LinuxArm64 => "linux-arm64",
         }
     }
+    /// The architecture of an executable from its bytes: a Mach-O file (thin, or universal with
+    /// arm64 and x86_64), a PE file (x64, arm64) or an ELF file (x86_64, aarch64).
+    pub fn detect(data: &[u8]) -> Option<Arch> {
+        use crate::format::{elf, macho, pe};
+        if macho::is_macho(data) {
+            let mut names: Vec<&str> = Vec::new();
+            for s in macho::slices(data).ok()? {
+                names.push(macho::Image::parse(&s.data).ok()?.arch_name());
+            }
+            let arm = names.iter().any(|n| n.starts_with("arm64"));
+            let x64 = names.contains(&"x86_64");
+            return match (arm, x64) {
+                (true, true) => Some(Arch::MacosUniversal),
+                (true, false) => Some(Arch::MacosArm64),
+                (false, true) => Some(Arch::MacosX64),
+                _ => None,
+            };
+        }
+        if data.starts_with(b"MZ") {
+            return match pe::Image::parse(data.to_vec()).ok()?.machine() {
+                pe::machine::AMD64 => Some(Arch::WindowsX64),
+                pe::machine::ARM64 => Some(Arch::WindowsArm64),
+                _ => None,
+            };
+        }
+        if elf::is_elf(data) {
+            let e = elf::Elf::parse(data).ok()?;
+            return match (e.machine, e.is_64) {
+                (elf::machine::X86_64, true) => Some(Arch::LinuxX64),
+                (elf::machine::AARCH64, true) => Some(Arch::LinuxArm64),
+                _ => None,
+            };
+        }
+        None
+    }
+    /// [`Arch::detect`] for a file.
+    pub fn of_file(path: impl AsRef<Path>) -> Result<Arch> {
+        let path = path.as_ref();
+        let data = std::fs::read(path).map_err(|e| Error::io(path, e))?;
+        Arch::detect(&data).ok_or_else(|| Error::invalid("app", "binaries", format!("{} isn't a macOS, Windows or Linux executable packager knows", path.display())))
+    }
     /// Parses [`Arch::name`].
     pub fn parse(s: &str) -> Option<Arch> {
         [Arch::MacosArm64, Arch::MacosX64, Arch::MacosUniversal, Arch::WindowsX64, Arch::WindowsArm64, Arch::LinuxX64, Arch::LinuxArm64].into_iter().find(|a| a.name() == s)
@@ -216,6 +257,12 @@ impl App {
         self.binaries.push((arch, path.into()));
         self
     }
+    /// Adds a binary, reading its architecture from the file ([`Arch::of_file`]).
+    pub fn binary_file(self, path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let arch = Arch::of_file(&path)?;
+        Ok(self.binary(arch, path))
+    }
     /// Sets the icon source.
     pub fn icon(mut self, path: impl Into<PathBuf>) -> Self {
         self.icon = Some(path.into());
@@ -315,6 +362,14 @@ mod tests {
         assert!(Version::parse("1.02").is_err());
         assert!(Version::parse("1.2.3.4").is_err());
         assert!(Version::parse("1.x").is_err());
+    }
+
+    #[test]
+    fn detects_architectures() {
+        use crate::format::elf::{machine, tests::stub};
+        assert_eq!(Arch::detect(&stub(machine::X86_64)), Some(Arch::LinuxX64));
+        assert_eq!(Arch::detect(&stub(machine::AARCH64)), Some(Arch::LinuxArm64));
+        assert_eq!(Arch::detect(b"#!/bin/sh\n"), None);
     }
 
     #[test]

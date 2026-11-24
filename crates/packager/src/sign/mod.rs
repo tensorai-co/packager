@@ -27,6 +27,36 @@ use crate::crypto::x509::Certificate;
 
 pub use signer::KeySigner;
 
+/// Resolves an identity the way `codesign -s` and the `packager` command take it: `-` (ad hoc),
+/// `p12:FILE` and `pem:CERT,KEY` (password from `password`, else `PACKAGER_P12_PASSWORD`), or on
+/// macOS a keychain identity's common name, a unique part of it, or its SHA-1. Missing
+/// intermediate certificates of key files are fetched from their issuer URLs.
+pub fn identity(spec: &str, password: Option<&str>) -> Result<AppleIdentity> {
+    if spec == "-" || spec == "adhoc" {
+        return Ok(AppleIdentity::AdHoc);
+    }
+    let pw = password.map(String::from).or_else(|| std::env::var("PACKAGER_P12_PASSWORD").ok());
+    let signer: Arc<dyn Signer> = if let Some(p12) = spec.strip_prefix("p12:") {
+        KeySigner::pkcs12(p12, pw.as_deref().unwrap_or(""))?.complete_chain(&crate::transport::Curl)?.into_arc()
+    } else if let Some(pem) = spec.strip_prefix("pem:") {
+        let (cert, key) = pem.split_once(',').ok_or_else(|| crate::Error::invalid("sign", "identity", "`pem:CERT,KEY` needs both files"))?;
+        KeySigner::pem(cert, key, pw.as_deref())?.complete_chain(&crate::transport::Curl)?.into_arc()
+    } else {
+        keychain_signer(spec)?
+    };
+    Ok(AppleIdentity::Signer(signer))
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_signer(spec: &str) -> Result<Arc<dyn Signer>> {
+    Ok(Arc::new(keychain::KeychainSigner::find(spec)?))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_signer(spec: &str) -> Result<Arc<dyn Signer>> {
+    Err(crate::Error::invalid("sign", "identity", format!("`{spec}`: keychain identities need macOS; use p12:FILE or pem:CERT,KEY")))
+}
+
 /// A source of signatures: a key file, a token, an OS key store or a cloud service.
 pub trait Signer: Send + Sync {
     /// The leaf certificate first, then intermediates (and the anchor, when known).

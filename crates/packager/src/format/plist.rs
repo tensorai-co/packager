@@ -98,6 +98,13 @@ impl Value {
             _ => None,
         }
     }
+    /// The dictionary inside, mutably, if this is one.
+    pub fn as_dict_mut(&mut self) -> Option<&mut Dict> {
+        match self {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        }
+    }
     /// The string inside, if this is one.
     pub fn as_str(&self) -> Option<&str> {
         match self {
