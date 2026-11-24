@@ -5,9 +5,11 @@
 //! signer only ever signs a digest the packager computed: the key never has to leave its store.
 
 pub mod apple;
+pub mod assess;
 pub mod bundle;
 pub mod cms;
 pub mod disk_image;
+pub mod installer;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 pub mod requirement;
@@ -167,8 +169,11 @@ impl Apple {
             Timestamp::Apple => Some(timestamp::APPLE_TSA.to_string()),
             Timestamp::Url(u) => Some(u.clone()),
             Timestamp::Auto => {
-                let devid = crate::crypto::der::oid_from_str(requirement::apple_oids::DEVELOPER_ID_LEAF).ok();
-                let is_devid = s.leaf().zip(devid).is_some_and(|(c, o)| c.extension(&o).is_some());
+                // Developer ID Application or Installer certificates.
+                let is_devid = [requirement::apple_oids::DEVELOPER_ID_LEAF, assess::DEVELOPER_ID_INSTALLER_LEAF]
+                    .iter()
+                    .filter_map(|o| crate::crypto::der::oid_from_str(o).ok())
+                    .any(|o| s.leaf().is_some_and(|c| c.extension(&o).is_some()));
                 is_devid.then(|| timestamp::APPLE_TSA.to_string())
             }
         }

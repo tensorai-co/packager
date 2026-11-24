@@ -124,6 +124,87 @@ fn entry_element(e: &XarEntry, heap: &mut Vec<u8>, next_id: &mut u32, mtime: i64
     }
 }
 
+/// The raw parts of an archive: header length, compressed TOC, parsed `<xar>` root and heap
+/// (which ends before any stapled notarization ticket).
+#[derive(Debug, Clone)]
+pub struct Parts<'a> {
+    /// The compressed table of contents, as stored.
+    pub toc_compressed: &'a [u8],
+    /// The `<xar>` root element.
+    pub root: Element,
+    /// The heap.
+    pub heap: &'a [u8],
+}
+
+/// Splits an archive into its parts, checking the header and the TOC checksum.
+pub fn parts(data: &[u8]) -> Result<Parts<'_>> {
+    let bad = |m: &str| Error::malformed("xar", m);
+    let data = without_ticket(data);
+    if data.len() < 28 || &data[..4] != b"xar!" {
+        return Err(bad("missing `xar!` header"));
+    }
+    let hsize = be16(data, 4) as usize;
+    let toc_len = u64::from_be_bytes(data[8..16].try_into().unwrap_or_default()) as usize;
+    if be32(data, 24) != 1 {
+        return Err(bad("only SHA-1 checksums are supported"));
+    }
+    let toc_compressed = data.get(hsize..hsize.saturating_add(toc_len)).ok_or_else(|| bad("truncated TOC"))?;
+    let heap = &data[hsize + toc_len..];
+    let toc_xml = String::from_utf8(unzlib(toc_compressed)?).map_err(|_| bad("TOC isn't UTF-8"))?;
+    let root = xml::parse(&toc_xml)?;
+    let toc = root.find("toc").ok_or_else(|| bad("no <toc>"))?;
+    let num = |e: Option<&Element>, k: &str| e.and_then(|e| e.find(k)).and_then(|x| x.text_content().trim().parse::<usize>().ok());
+    let ck = toc.find("checksum");
+    let (off, size) = (num(ck, "offset").unwrap_or(0), num(ck, "size").unwrap_or(20));
+    if heap.get(off..off + size) != Some(&sha1(toc_compressed)[..]) {
+        return Err(bad("TOC checksum mismatch"));
+    }
+    Ok(Parts { toc_compressed, root, heap })
+}
+
+/// The TOC checksum (SHA-1 of the compressed TOC): what installer signatures sign and what a
+/// notarization ticket for the archive is filed under.
+pub fn toc_checksum(data: &[u8]) -> Result<[u8; 20]> {
+    Ok(sha1(parts(data)?.toc_compressed))
+}
+
+const TICKET_TRAILER: &[u8; 4] = b"t8lr";
+
+/// The archive without a stapled notarization ticket (see [`crate::staple`]): a `t8lr`
+/// terminator record, the ticket, then a `t8lr` ticket record (16 bytes each, little-endian).
+pub fn without_ticket(data: &[u8]) -> &[u8] {
+    match ticket_span(data) {
+        Some((start, _)) => &data[..start],
+        None => data,
+    }
+}
+
+/// (start of the stapled records, ticket range) when a ticket is stapled.
+pub(crate) fn ticket_span(data: &[u8]) -> Option<(usize, std::ops::Range<usize>)> {
+    let le16 = |b: &[u8], p: usize| u16::from_le_bytes([b[p], b[p + 1]]);
+    let t = data.get(data.len().checked_sub(16)?..)?;
+    if &t[..4] != TICKET_TRAILER || le16(t, 6) != 2 {
+        return None;
+    }
+    let len = u32::from_le_bytes(t[8..12].try_into().ok()?) as usize;
+    let ticket_start = data.len().checked_sub(16)?.checked_sub(len)?;
+    let term = data.get(ticket_start.checked_sub(16)?..ticket_start)?;
+    if &term[..4] != TICKET_TRAILER || le16(term, 6) != 1 {
+        return None;
+    }
+    Some((ticket_start - 16, ticket_start..ticket_start + len))
+}
+
+/// The 16-byte `t8lr` record: magic, version 1, `kind` (1 terminator, 2 ticket), length, unused.
+pub(crate) fn ticket_record(kind: u16, len: u32) -> [u8; 16] {
+    let mut r = [0u8; 16];
+    r[..4].copy_from_slice(TICKET_TRAILER);
+    r[4..6].copy_from_slice(&1u16.to_le_bytes());
+    r[6..8].copy_from_slice(&kind.to_le_bytes());
+    r[8..12].copy_from_slice(&len.to_le_bytes());
+    r
+}
+
 /// A file read back from an archive.
 #[derive(Debug, Clone)]
 pub struct XarFile {
@@ -136,6 +217,7 @@ pub struct XarFile {
 /// Reads every file of a XAR archive, verifying the TOC and data checksums.
 pub fn read(data: &[u8]) -> Result<(Element, Vec<XarFile>)> {
     let bad = |m: &str| Error::malformed("xar", m);
+    let data = without_ticket(data);
     if data.len() < 28 || &data[..4] != b"xar!" {
         return Err(bad("missing `xar!` header"));
     }

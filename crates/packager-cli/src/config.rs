@@ -15,6 +15,7 @@ pub struct Config {
     pub pkg: Option<Pkg>,
     pub app_package: bool,
     pub apple: Option<packager::sign::Apple>,
+    pub notarize: Option<packager::notary::Notarize>,
     pub out_dir: PathBuf,
 }
 
@@ -68,7 +69,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
     let root = toml::parse(&src).map_err(|e| format!("{}: {e}", path.display()))?;
     let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let rel = |p: &str| -> PathBuf { if Path::new(p).is_absolute() { PathBuf::from(p) } else { base.join(p) } };
-    check_keys(&root, &["app", "package", "sign", "build"], "")?;
+    check_keys(&root, &["app", "package", "sign", "notarize", "build"], "")?;
 
     let a = root.get("app").ok_or("missing [app] table")?;
     check_keys(a, &["name", "identifier", "version", "build_number", "publisher", "description", "copyright", "executable", "icon", "binaries", "resources", "url_schemes", "file_types"], "app")?;
@@ -195,18 +196,21 @@ pub fn load(path: &Path) -> Result<Config, String> {
     let apple = match root.get("sign").and_then(|s| s.get("apple")) {
         None => None,
         Some(sa) => {
-            check_keys(sa, &["identity", "hardened_runtime", "entitlements", "timestamp", "requirements"], "sign.apple")?;
-            let identity = s(sa, "identity", "sign.apple")?.unwrap_or("-");
-            let identity = match identity.strip_prefix("p12:") {
-                // Paths in identity specs are relative to packager.toml too.
+            check_keys(sa, &["identity", "installer_identity", "hardened_runtime", "entitlements", "timestamp", "requirements"], "sign.apple")?;
+            // Paths in identity specs are relative to packager.toml too.
+            let spec = |identity: &str| match identity.strip_prefix("p12:") {
                 Some(p) => format!("p12:{}", rel(p).display()),
                 None => match identity.strip_prefix("pem:").and_then(|p| p.split_once(',')) {
                     Some((c, k)) => format!("pem:{},{}", rel(c).display(), rel(k).display()),
                     None => identity.to_string(),
                 },
             };
+            let identity = spec(s(sa, "identity", "sign.apple")?.unwrap_or("-"));
             let mut ap = packager::sign::Apple::ad_hoc();
             ap.application = crate::codesign::identity(&identity, None)?;
+            if let Some(i) = s(sa, "installer_identity", "sign.apple")? {
+                ap.installer = Some(crate::codesign::identity(&spec(i), None)?);
+            }
             if sa.get("hardened_runtime").and_then(Toml::as_bool) == Some(true) {
                 ap = ap.hardened_runtime();
             }
@@ -227,6 +231,25 @@ pub fn load(path: &Path) -> Result<Config, String> {
             Some(ap)
         }
     };
+    let notarize = match root.get("notarize") {
+        None => None,
+        Some(n) => {
+            check_keys(n, &["key", "key_id", "issuer", "timeout_minutes", "staple"], "notarize")?;
+            let key = std::env::var("PACKAGER_NOTARY_KEY").ok().map(PathBuf::from).or(s(n, "key", "notarize")?.map(rel));
+            let key_id = std::env::var("PACKAGER_NOTARY_KEY_ID").ok().or(s(n, "key_id", "notarize")?.map(String::from));
+            let issuer = std::env::var("PACKAGER_NOTARY_ISSUER").ok().or(s(n, "issuer", "notarize")?.map(String::from));
+            let key = key.ok_or("[notarize] needs `key` (an AuthKey_<ID>.p8 file) or PACKAGER_NOTARY_KEY")?;
+            let api = packager::notary::ApiKey::from_file(&key, key_id.as_deref(), issuer.as_deref()).map_err(|e| e.to_string())?;
+            let mut nz = packager::notary::Notarize::new(api);
+            if let Some(m) = n.get("timeout_minutes").and_then(Toml::as_int) {
+                nz.timeout = std::time::Duration::from_secs(m.max(1) as u64 * 60);
+            }
+            if let Some(b) = n.get("staple").and_then(Toml::as_bool) {
+                nz.staple = b;
+            }
+            Some(nz)
+        }
+    };
     let out_dir = root
         .get("build")
         .map(|b| -> Result<Option<PathBuf>, String> {
@@ -236,7 +259,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .transpose()?
         .flatten()
         .unwrap_or_else(|| base.join("target/dist"));
-    Ok(Config { app, app_bundle, dmg, pkg, app_package, apple, out_dir })
+    Ok(Config { app, app_bundle, dmg, pkg, app_package, apple, notarize, out_dir })
 }
 
 fn toml_to_plist(v: &Toml) -> Option<packager::format::plist::Value> {

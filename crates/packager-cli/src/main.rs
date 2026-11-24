@@ -2,6 +2,7 @@
 
 mod codesign;
 mod config;
+mod distribute;
 mod toml;
 
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use packager::format::{bom, cpio, macho, udif, xar};
 use packager::sign::apple::{verify_macho, CS_ADHOC, CS_RUNTIME};
 use packager::sign::bundle::verify_bundle;
 
-const USAGE: &str = "\
+const USAGE_TEMPLATE: &str = "\
 packager — native macOS packages from scratch, no platform tools needed
 
 USAGE:
@@ -20,12 +21,20 @@ USAGE:
                   [-i ID] [--hardened-runtime] [--entitlements FILE] [-r REQS] [--timestamp[=URL|none]]
     packager codesign …                codesign's own command line (sign, -v verify, -d display)
     packager identities                code-signing identities in the keychain
+{DISTRIBUTE}
     packager verify <file|bundle>      signatures and structure, without native tools
     packager inspect <file|bundle>     what's inside a .dmg, .pkg, .app or Mach-O file
     packager icns <icon.png> <out.icns>
     packager --version
 
-IDENTITY: `-` (ad hoc, the default), a keychain identity name/SHA-1, `p12:FILE`, `pem:CERT,KEY`.";
+IDENTITY: `-` (ad hoc, the default), a keychain identity name/SHA-1, `p12:FILE`, `pem:CERT,KEY`.
+A .pkg given to `sign` gets an installer signature (use an installer identity).";
+
+fn usage() -> String {
+    USAGE_TEMPLATE.replace("{DISTRIBUTE}\n", &format!("{}\n", distribute::USAGE.split("\n\n").next().unwrap_or_default()))
+        + "\n\n"
+        + distribute::USAGE.split("\n\n").nth(1).unwrap_or_default()
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,13 +47,13 @@ fn main() -> ExitCode {
     }
 }
 
-struct Args<'a> {
-    positional: Vec<&'a str>,
-    flags: Vec<(&'a str, Option<&'a str>)>,
+pub struct Args<'a> {
+    pub positional: Vec<&'a str>,
+    pub flags: Vec<(&'a str, Option<&'a str>)>,
 }
 
 impl<'a> Args<'a> {
-    fn parse(args: &'a [String], with_value: &[&str]) -> Result<Self, String> {
+    pub fn parse(args: &'a [String], with_value: &[&str]) -> Result<Self, String> {
         let mut out = Args { positional: Vec::new(), flags: Vec::new() };
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -63,13 +72,13 @@ impl<'a> Args<'a> {
         }
         Ok(out)
     }
-    fn value(&self, k: &str) -> Option<&'a str> {
+    pub fn value(&self, k: &str) -> Option<&'a str> {
         self.flags.iter().rev().find(|(f, _)| *f == k).and_then(|(_, v)| *v)
     }
-    fn check(&self, allowed: &[&str]) -> Result<(), String> {
+    pub fn check(&self, allowed: &[&str]) -> Result<(), String> {
         for (f, _) in &self.flags {
             if !allowed.contains(f) {
-                return Err(format!("unknown option --{f}\n\n{USAGE}"));
+                return Err(format!("unknown option --{f}\n\n{}", usage()));
             }
         }
         Ok(())
@@ -78,7 +87,7 @@ impl<'a> Args<'a> {
 
 fn run(args: &[String]) -> Result<(), String> {
     let Some(cmd) = args.first() else {
-        println!("{USAGE}");
+        println!("{}", usage());
         return Ok(());
     };
     let rest = &args[1..];
@@ -90,21 +99,25 @@ fn run(args: &[String]) -> Result<(), String> {
         "verify" => verify(rest),
         "inspect" => inspect(rest),
         "icns" => icns(rest),
+        "notarize" => distribute::notarize(rest),
+        "staple" => distribute::staple(rest),
+        "productsign" => distribute::productsign(rest),
+        "assess" => distribute::run_assess(rest),
         "--version" | "-V" | "version" => {
             println!("packager {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         "--help" | "-h" | "help" => {
-            println!("{USAGE}");
+            println!("{}", usage());
             Ok(())
         }
-        other => Err(format!("unknown command `{other}`\n\n{USAGE}")),
+        other => Err(format!("unknown command `{other}`\n\n{}", usage())),
     }
 }
 
 fn build(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["config", "only", "out"])?;
-    a.check(&["config", "only", "out"])?;
+    a.check(&["config", "only", "out", "no-notarize"])?;
     let cfg_path = PathBuf::from(a.value("config").unwrap_or("packager.toml"));
     let cfg = config::load(&cfg_path)?;
     let only: Option<Vec<&str>> = a.value("only").map(|o| o.split(',').map(str::trim).collect());
@@ -139,14 +152,39 @@ fn build(args: &[String]) -> Result<(), String> {
     if let Some(apple) = cfg.apple {
         b = b.sign(apple);
     }
+    if let Some(n) = cfg.notarize
+        && !a.flags.iter().any(|(f, _)| *f == "no-notarize")
+    {
+        eprintln!("notarizing after the build (pass --no-notarize to skip)…");
+        b = b.notarize(n);
+    }
     let out = b.run().map_err(|e| e.to_string())?;
     for p in out.packages() {
-        println!("{:<4} {:<16} {:>10}  {}  {}", p.kind(), p.arch(), p.size(), p.sha256_hex(), p.path().display());
+        let tag = if p.notarized() { "notarized" } else if p.signed() { "signed" } else { "unsigned" };
+        println!("{:<4} {:<16} {:>10}  {:<9}  {}  {}", p.kind(), p.arch(), p.size(), tag, p.sha256_hex(), p.path().display());
     }
     Ok(())
 }
 
 fn sign(args: &[String]) -> Result<(), String> {
+    if let Some(pkg) = args.iter().find(|a| !a.starts_with('-') && (a.ends_with(".pkg") || a.ends_with(".mpkg"))) {
+        // `packager sign My.pkg -s "Developer ID Installer: …"`: an installer signature in place.
+        let mut spec = None;
+        let mut ts: Option<Option<&str>> = None;
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "-s" | "--sign" => spec = it.next().map(String::as_str),
+                "--timestamp" => ts = Some(None),
+                x if x.starts_with("--timestamp=") => ts = Some(Some(&x["--timestamp=".len()..])),
+                x if x.starts_with("--sign=") => spec = Some(&x["--sign=".len()..]),
+                _ => {}
+            }
+        }
+        let spec = spec.ok_or("signing a .pkg needs an installer identity: -s \"Developer ID Installer: …\"")?;
+        let p = Path::new(pkg);
+        return distribute::sign_installer(spec, std::env::var("PACKAGER_P12_PASSWORD").ok().as_deref(), ts, p, p);
+    }
     let has_identity = args.iter().any(|a| a == "-s" || a.starts_with("--sign") || a.starts_with("--p12") || a.starts_with("--cert") || (a.starts_with("-s") && !a.starts_with("--")));
     let mut a = args.to_vec();
     if !has_identity {
@@ -177,7 +215,7 @@ fn ext(path: &Path) -> String {
 fn verify(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &[])?;
     a.check(&[])?;
-    let [target] = a.positional[..] else { return Err(format!("verify takes one path\n\n{USAGE}")) };
+    let [target] = a.positional[..] else { return Err(format!("verify takes one path\n\n{}", usage())) };
     let path = Path::new(target);
     let e = |x: packager::Error| x.to_string();
     if path.is_dir() {
@@ -207,7 +245,9 @@ fn verify(args: &[String]) -> Result<(), String> {
                     cpio::read_odc(&raw).map_err(e)?;
                 }
             }
-            println!("{}: valid XAR archive ({} files, checksums match), Bom lists {paths} paths, payload readable; no installer signature", path.display(), files.len());
+            let sig = distribute::describe_pkg_signature(&data)?;
+            let ticket = if packager::staple::stapled_ticket(path).ok().flatten().is_some() { "; ticket stapled" } else { "" };
+            println!("{}: valid XAR archive ({} files, checksums match), Bom lists {paths} paths, payload readable; {sig}{ticket}", path.display(), files.len());
         }
         _ if macho::is_macho(&data) => {
             for s in verify_macho(&data).map_err(e)? {
@@ -222,7 +262,7 @@ fn verify(args: &[String]) -> Result<(), String> {
 fn inspect(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &[])?;
     a.check(&[])?;
-    let [target] = a.positional[..] else { return Err(format!("inspect takes one path\n\n{USAGE}")) };
+    let [target] = a.positional[..] else { return Err(format!("inspect takes one path\n\n{}", usage())) };
     let path = Path::new(target);
     let e = |x: packager::Error| x.to_string();
     let print_sig = |label: &str, data: &[u8]| -> Result<(), String> {
@@ -292,7 +332,7 @@ fn inspect(args: &[String]) -> Result<(), String> {
 fn icns(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &[])?;
     a.check(&[])?;
-    let [src, dst] = a.positional[..] else { return Err(format!("icns takes <icon.png> <out.icns>\n\n{USAGE}")) };
+    let [src, dst] = a.positional[..] else { return Err(format!("icns takes <icon.png> <out.icns>\n\n{}", usage())) };
     let data = packager::image::icns_from_png(src).map_err(|e| e.to_string())?;
     std::fs::write(dst, data).map_err(|e| format!("{dst}: {e}"))?;
     println!("wrote {dst}");

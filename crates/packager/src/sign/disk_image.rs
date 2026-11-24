@@ -225,3 +225,84 @@ pub fn verify_disk_image(image: &[u8]) -> Result<SliceSignature> {
         entitlements: None,
     })
 }
+
+/// The blobs of a signed image's SuperBlob, as (slot, whole blob), in slot order.
+fn superblob(image: &[u8]) -> Result<Vec<(u32, Vec<u8>)>> {
+    let bad = |m: &str| Error::malformed("disk image signature", m);
+    let (_, koly) = split(image)?;
+    let (off, len) = (be64(&koly, SIG_OFFSET_FIELD) as usize, be64(&koly, SIG_LENGTH_FIELD) as usize);
+    if off == 0 || len == 0 {
+        return Err(bad("not signed"));
+    }
+    let sb = image.get(off..off + len).ok_or_else(|| bad("signature out of range"))?;
+    let be = |p: usize| -> Result<u32> { sb.get(p..p + 4).map(|x| u32::from_be_bytes([x[0], x[1], x[2], x[3]])).ok_or_else(|| bad("truncated")) };
+    if be(0)? != 0xfade_0cc0 {
+        return Err(bad("not a SuperBlob"));
+    }
+    let mut blobs = Vec::new();
+    for i in 0..be(8)? as usize {
+        let (slot, o) = (be(12 + 8 * i)?, be(16 + 8 * i)? as usize);
+        let l = be(o + 4)? as usize;
+        blobs.push((slot, sb.get(o..o + l).ok_or_else(|| bad("blob out of range"))?.to_vec()));
+    }
+    blobs.sort_by_key(|b| b.0);
+    Ok(blobs)
+}
+
+/// The payload of a wrapper blob (`0xfade0b01`) in `slot` of a signed image, such as the
+/// stapled notarization ticket in slot `0x10002`.
+pub fn blob(image: &[u8], slot: u32) -> Result<Option<Vec<u8>>> {
+    Ok(superblob(image)?.into_iter().find(|b| b.0 == slot).map(|(_, b)| if b.starts_with(&[0xfa, 0xde, 0x0b, 0x01]) { b[8..].to_vec() } else { b }))
+}
+
+/// Puts `payload` (wrapped in a `0xfade0b01` blob) into `slot` of a signed image's SuperBlob,
+/// or removes the slot when `None`, and updates the trailer. The CodeDirectory doesn't cover
+/// these slots or the signature length, so the signature stays valid.
+pub fn replace_blob(image: &[u8], slot: u32, payload: Option<&[u8]>) -> Result<Vec<u8>> {
+    if slot == 0 || slot == CSSLOT_REQUIREMENTS as u32 || slot == 0x10000 {
+        return Err(Error::invalid("disk image signature", format!("slot {slot:#x}"), "signed slots can't be replaced"));
+    }
+    let mut blobs = superblob(image)?;
+    blobs.retain(|b| b.0 != slot);
+    if let Some(p) = payload {
+        let mut b = Vec::with_capacity(p.len() + 8);
+        b.u32(0xfade_0b01);
+        b.u32(p.len() as u32 + 8);
+        b.extend_from_slice(p);
+        blobs.push((slot, b));
+        blobs.sort_by_key(|b| b.0);
+    }
+    let (data, mut koly) = split(image)?;
+    let sb_len = 12 + 8 * blobs.len() + blobs.iter().map(|b| b.1.len()).sum::<usize>();
+    let mut sb = Vec::with_capacity(sb_len);
+    sb.u32(0xfade_0cc0);
+    sb.u32(sb_len as u32);
+    sb.u32(blobs.len() as u32);
+    let mut off = 12 + 8 * blobs.len();
+    for (s, b) in &blobs {
+        sb.u32(*s);
+        sb.u32(off as u32);
+        off += b.len();
+    }
+    for (_, b) in &blobs {
+        sb.extend_from_slice(b);
+    }
+    koly[SIG_LENGTH_FIELD..SIG_LENGTH_FIELD + 8].copy_from_slice(&(sb.len() as u64).to_be_bytes());
+    let mut out = Vec::with_capacity(data.len() + sb.len() + KOLY_LEN);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&sb);
+    out.extend_from_slice(&koly);
+    Ok(out)
+}
+
+/// The hash type (1 = SHA-1, 2 = SHA-256) and digest of a signed image's CodeDirectory: what
+/// its notarization ticket is filed under.
+pub fn code_directory_hash(image: &[u8]) -> Result<(u8, Vec<u8>)> {
+    let cd = superblob(image)?.into_iter().find(|b| b.0 == 0).map(|b| b.1).ok_or_else(|| Error::malformed("disk image signature", "no CodeDirectory"))?;
+    let ty = *cd.get(37).ok_or_else(|| Error::malformed("disk image signature", "truncated CodeDirectory"))?;
+    let digest = match ty {
+        1 => crate::crypto::sha1(&cd).to_vec(),
+        _ => sha256(&cd).to_vec(),
+    };
+    Ok((ty, digest))
+}

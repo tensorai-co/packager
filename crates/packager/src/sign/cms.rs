@@ -40,16 +40,25 @@ fn cdhashes_plist(cds: &[CdHash]) -> Vec<u8> {
 /// lists every CodeDirectory (primary first). `tsa` gets the signature value and returns a
 /// timestamp token when timestamping.
 pub fn sign(signer: &dyn Signer, primary_cd: &[u8], cds: &[CdHash], signing_time: i64, tsa: Option<Timestamper>) -> Result<Vec<u8>> {
-    let chain = signer.certificate_chain();
-    let leaf = chain.first().ok_or_else(|| Error::Other("signer has no certificate".into()))?;
-    let digest_alg = HashAlg::Sha256;
-    let attrs = vec![
-        attribute(oids::CONTENT_TYPE, vec![der::oid(oids::PKCS7_DATA)]),
-        attribute(oids::SIGNING_TIME, vec![der::utc_time(signing_time)]),
-        attribute(oids::MESSAGE_DIGEST, vec![der::octet_string(&digest_alg.digest(primary_cd))]),
+    let apple = vec![
         attribute(oids::APPLE_CDHASHES, cds.iter().map(|c| der::seq(&[&der::oid(digest_oid(c.hash)), &der::octet_string(&c.digest)])).collect()),
         attribute(oids::APPLE_CDHASHES_PLIST, vec![der::octet_string(&cdhashes_plist(cds))]),
     ];
+    sign_detached(signer, primary_cd, HashAlg::Sha256, apple, signing_time, tsa)
+}
+
+/// A detached `SignedData` over `content`: signed attributes `contentType`, `signingTime`,
+/// `messageDigest` plus `extra_attrs`, the signer's whole chain, and an optional RFC 3161
+/// timestamp over the signature value.
+pub fn sign_detached(signer: &dyn Signer, content: &[u8], digest_alg: HashAlg, extra_attrs: Vec<Vec<u8>>, signing_time: i64, tsa: Option<Timestamper>) -> Result<Vec<u8>> {
+    let chain = signer.certificate_chain();
+    let leaf = chain.first().ok_or_else(|| Error::Other("signer has no certificate".into()))?;
+    let mut attrs = vec![
+        attribute(oids::CONTENT_TYPE, vec![der::oid(oids::PKCS7_DATA)]),
+        attribute(oids::SIGNING_TIME, vec![der::utc_time(signing_time)]),
+        attribute(oids::MESSAGE_DIGEST, vec![der::octet_string(&digest_alg.digest(content))]),
+    ];
+    attrs.extend(extra_attrs);
     // Signed over the explicit SET OF encoding; stored with the [0] IMPLICIT tag.
     let signed_attrs = der::set_of(attrs);
     let signature = signer.sign_digest(&digest_alg.digest(&signed_attrs), digest_alg)?;
@@ -89,7 +98,7 @@ pub struct Verified {
     pub cdhashes: Vec<Vec<u8>>,
 }
 
-/// Checks a detached CMS signature over `content` (the primary CodeDirectory): the message
+/// Checks a detached CMS signature over `content` (the primary CodeDirectory, or a XAR checksum): the message
 /// digest, the signer's signature over the signed attributes, and that the issuing chain links up.
 /// Trust in the anchor is the caller's decision.
 pub fn verify(cms: &[u8], content: &[u8]) -> Result<Verified> {
@@ -178,7 +187,7 @@ pub fn verify(cms: &[u8], content: &[u8]) -> Result<Verified> {
         }
     }
     if message_digest.as_deref() != Some(&hash.digest(content)[..]) {
-        return Err(Error::Other("CMS message digest doesn't match the CodeDirectory".into()));
+        return Err(Error::Other("CMS message digest doesn't match the signed content".into()));
     }
     let sig_hash = hash_for_signature_oid(&sig_alg).unwrap_or(hash);
     if !signer.public_key.verify(&sig_alg, &sig_hash.digest(&set), &signature) {

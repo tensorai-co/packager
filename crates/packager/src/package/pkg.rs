@@ -203,7 +203,17 @@ impl PackageBuilder for Pkg {
         let app_path = ctx.signed_app()?;
         let min = self.min_macos.clone().unwrap_or_else(|| ctx.app_bundle.min_macos_value().to_string());
         let path = self.write_from_app(ctx.app, &app_path, &ctx.out_dir, &min)?;
-        // Installer signatures need a Developer ID Installer identity (CMS); not yet available.
-        Ok(vec![Package::file(PackageKind::Pkg, macos_arch_label(ctx.app), path, false)?])
+        // Order: the app inside was signed first; now the installer signature over the archive.
+        let mut signed = false;
+        if let Some(apple) = ctx.apple
+            && let Some(id @ crate::sign::AppleIdentity::Signer(s)) = &apple.installer
+        {
+            let mut o = crate::sign::installer::InstallerSignOptions::new(s.as_ref());
+            o.timestamp_url = apple.timestamp_url(id);
+            let data = std::fs::read(&path).at(&path)?;
+            std::fs::write(&path, crate::sign::installer::sign_pkg(&data, &o)?).at(&path)?;
+            signed = true;
+        }
+        Ok(vec![Package::file(PackageKind::Pkg, macos_arch_label(ctx.app), path, signed)?])
     }
 }

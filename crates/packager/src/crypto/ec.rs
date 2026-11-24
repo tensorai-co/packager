@@ -241,6 +241,21 @@ impl EcPublicKey {
     }
 }
 
+/// Converts a DER `Ecdsa-Sig-Value` to the fixed-size `r || s` form (JWS, WebAuthn).
+pub fn der_to_raw(sig: &[u8], size: usize) -> Result<Vec<u8>> {
+    let t = der::parse(sig)?;
+    let mut r = t.reader();
+    let rr = r.expect(der::tag::INTEGER)?.as_biguint()?;
+    let ss = r.expect(der::tag::INTEGER)?.as_biguint()?;
+    Ok([rr.to_be_bytes_padded(size), ss.to_be_bytes_padded(size)].concat())
+}
+
+/// Converts fixed-size `r || s` to a DER `Ecdsa-Sig-Value`.
+pub fn raw_to_der(raw: &[u8]) -> Vec<u8> {
+    let (r, s) = raw.split_at(raw.len() / 2);
+    der::seq(&[&der::integer_unsigned_bytes(r), &der::integer_unsigned_bytes(s)])
+}
+
 fn bits2int(digest: &[u8], n: &BigUint) -> BigUint {
     let v = BigUint::from_be_bytes(digest);
     let dl = digest.len() * 8;

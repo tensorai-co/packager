@@ -12,6 +12,7 @@ pub mod pkcs12;
 pub mod rsa;
 pub mod sha1;
 pub mod sha2;
+pub mod sigv4;
 pub mod x509;
 
 pub use sha1::Sha1;
@@ -26,6 +27,15 @@ pub fn hex(bytes: &[u8]) -> String {
         s.push(DIGITS[(b & 15) as usize] as char);
     }
     s
+}
+
+/// Decodes hex (either case).
+pub fn unhex(s: &str) -> crate::Result<Vec<u8>> {
+    let s = s.trim();
+    if s.len() % 2 != 0 {
+        return Err(crate::Error::Other(format!("odd-length hex `{s}`")));
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| crate::Error::Other(format!("bad hex `{s}`")))).collect()
 }
 
 /// SHA-256 of `data`.

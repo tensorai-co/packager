@@ -4,15 +4,16 @@ Native OS packages from scratch, in pure Rust, with zero dependencies (`std` onl
 The library comes first; the `packager` CLI only parses arguments and `packager.toml` and calls
 the library's public API.
 
-**Status: macOS.** `.app`, `.dmg` and `.pkg` are built, and code and disk images are signed —
-ad hoc or with a real certificate — without `codesign`, `hdiutil`, `pkgbuild`, `productbuild`,
-`iconutil` or `sips`. Windows and Debian/Ubuntu come later (see `proposed_packager_rs.md`).
+**Status: macOS.** `.app`, `.dmg` and `.pkg` are built, signed (ad hoc or with a real
+certificate, installer signatures included), notarized and stapled without `codesign`,
+`hdiutil`, `pkgbuild`, `productbuild`, `productsign`, `notarytool`, `stapler`, `spctl`, `iconutil`
+or `sips`. Windows and Debian/Ubuntu come later (see `proposed_packager_rs.md`).
 
 | Package | What's written | Checked against (CI oracles, never runtime deps) |
 | --- | --- | --- |
 | `.app` | `Info.plist`, universal binary (merged from per-arch inputs), `.icns` from one PNG, resources, frameworks, ad-hoc signature on every Mach-O + sealed `CodeResources` | `codesign --verify --deep --strict`, `plutil -lint`, `lipo`, running it |
 | `.dmg` | HFSX volume (catalog B-tree, bitmap, NFD names), `Applications` link, volume icon, optional background + Finder layout (`.DS_Store` + alias), UDZO (zlib) UDIF; code signature on the image when signing with a certificate | `hdiutil verify`, `fsck_hfs`, mounting, `codesign --verify` on the image and the app inside |
-| `.pkg` | Flat product archive: XAR with `Distribution`, `PackageInfo` (not relocatable), `Bom`, gzip'd cpio payload, optional scripts | `installer -pkginfo`, `pkgutil --expand-full`, `lsbom`, payload diff |
+| `.pkg` | Flat product archive: XAR with `Distribution`, `PackageInfo` (not relocatable), `Bom`, gzip'd cpio payload, optional scripts; installer signature (RSA + CMS in the TOC) with an installer identity | `installer -pkginfo`, `pkgutil --expand-full`, `pkgutil --check-signature`, `lsbom`, payload diff |
 
 Output is deterministic: same input, byte-identical packages (`SOURCE_DATE_EPOCH`, default
 1980-01-01).
@@ -22,6 +23,7 @@ Output is deterministic: same input, byte-identical packages (`SOURCE_DATE_EPOCH
 ```rust
 use packager::package::{AppBundle, Dmg, Pkg};
 use packager::sign::Apple;
+// use packager::notary::{ApiKey, Notarize};
 use packager::{App, Arch};
 
 let app = App::new("My App", "com.example.myapp", "1.4.0")
@@ -38,6 +40,9 @@ let out = packager::build(&app)
     .package(Dmg::new().window_background("assets/dmg.png"))
     .package(Pkg::new())
     .sign(Apple::ad_hoc().hardened_runtime())
+    // Shipping to other Macs: Developer ID identities and an App Store Connect API key.
+    // .sign(Apple::developer_id(app_id).installer(installer_id).hardened_runtime())
+    // .notarize(Notarize::new(ApiKey::from_file("AuthKey_ABCDE12345.p8", None, Some(issuer))?))
     .out_dir("target/dist")
     .run()?;
 for p in out.packages() {
@@ -46,9 +51,10 @@ for p in out.packages() {
 ```
 
 Each layer works on its own: `format::{plist, png, icns, macho, cpio, xar, bom, hfsplus, udif,
-ds_store}`, `compress::{deflate, zlib, gzip}`, `crypto::{sha1, sha256, crc}`,
-`crypto::{rsa, ec, x509, pkcs12, der, …}`, `sign::apple::{sign_macho, verify_macho}`,
-`sign::bundle::{sign_bundle, verify_bundle}`, `sign::disk_image`, `sign::requirement`.
+ds_store, zip, json}`, `compress::{deflate, zlib, gzip}`, `crypto::{sha1, sha256, crc}`,
+`crypto::{rsa, ec, x509, pkcs12, der, sigv4, …}`, `sign::apple::{sign_macho, verify_macho}`,
+`sign::bundle::{sign_bundle, verify_bundle}`, `sign::disk_image`, `sign::installer`,
+`sign::requirement`, `sign::assess`, `notary`, `staple`.
 
 ## Code signing: a `codesign` replacement
 
@@ -84,6 +90,47 @@ packager codesign -d -r- --entitlements - My.app
 packager identities                  # like `security find-identity -v -p codesigning`
 ```
 
+## Notarization, stapling and Gatekeeper
+
+What `notarytool`, `stapler`, `productsign` and `spctl -a` do, in Rust:
+
+- **Notary client**: App Store Connect API key (`.p8`, team or individual), ES256 JWT, the Notary
+  REST API (submit, status, developer log), and the upload to Apple's S3 bucket with the
+  temporary credentials it returns (AWS SigV4, single `PUT`). App bundles are zipped first like
+  `ditto -c -k --keepParent` (symlinks and modes kept). HTTPS goes through the `Transport`
+  trait; the default runs the system `curl`.
+- **Preflight**: before uploading, the rules Apple enforces are checked locally (Developer ID
+  chain to Apple Root CA, secure timestamp, hardened runtime, no `get-task-allow`), so a bad
+  build fails in seconds with the reason, not after a round trip to Apple.
+- **Stapling**: tickets are looked up in Apple's ticket service by record name
+  (`2/<hash type>/<cdhash or TOC checksum>`) and attached where each format keeps them:
+  `Contents/CodeResources` for bundles, SuperBlob slot `0x10002` for disk images, `t8lr`
+  records after the archive for flat packages. `staple --validate` checks offline that the
+  stapled ticket names this code.
+- **Installer signatures**: `productsign`'s layout: SHA-1 TOC checksum, an RSA signature over it
+  and a timestamped CMS signature, each with the certificate chain in the TOC's `KeyInfo`.
+- **Assessment**: `packager assess` reports each Gatekeeper rule separately, offline or with an
+  online ticket check.
+- **Builder**: `.notarize(…)` runs after signing, containers first (a `.dmg`'s ticket also covers
+  the `.app` inside, so the app is stapled without a second submission).
+
+Checked against Apple's tools: a notarized third-party `.pkg` and a copy of a notarized app,
+stapled by `packager`, pass `xcrun stapler validate` and `spctl -a` (`source=Notarized Developer
+ID`); stapled disk images pass `codesign --verify --strict` and `codesign -dvv` reports
+`Notarization Ticket=stapled`; `pkgutil --check-signature` reads our installer signatures; our
+verifier accepts Apple-written installer signatures (BER CMS, SHA-1). A full notarization
+round trip needs a Developer ID certificate and an API key, so it hasn't been run yet.
+
+```sh
+packager notarize "dist/My App-1.4.0.dmg" --key AuthKey_ABCDE12345.p8 --issuer <issuer-uuid>
+packager notarize "dist/My App.app" --key AuthKey_ABCDE12345.p8   # zipped for you, then stapled
+packager notarize --status <submission-id> --key …               # or --log <submission-id>
+packager staple "dist/My App-1.4.0.pkg"
+packager staple --validate "dist/My App-1.4.0.dmg"
+packager productsign --sign "Developer ID Installer" in.pkg out.pkg
+packager assess "dist/My App-1.4.0.dmg"                           # spctl -a, rule by rule
+```
+
 ## CLI
 
 ```sh
@@ -91,6 +138,7 @@ packager build                       # every package in packager.toml
 packager build --only dmg,pkg --out dist
 packager sign path/to/My.app --hardened-runtime --entitlements app.entitlements   # ad hoc
 packager sign My.app -s "Developer ID Application" --timestamp
+packager sign "dist/My App-1.4.0.pkg" -s "Developer ID Installer"   # installer signature
 packager verify "dist/My App-1.4.0.dmg"   # signatures and structure, without native tools
 packager inspect "dist/My App.app"
 packager icns icon.png AppIcon.icns
@@ -100,11 +148,15 @@ See [`packager.example.toml`](packager.example.toml) for every key.
 
 ## Not done yet (macOS)
 
-- **Installer signatures** for `.pkg` (`productsign`: a signature in the XAR table of contents).
-- **Notarization and stapling** (Notary REST API, JWT ES256, S3 SigV4 upload through `curl`).
+- **An end-to-end notarization run.** Every piece is tested against Apple's formats and tools,
+  but submitting needs a Developer ID certificate and an App Store Connect API key.
+- **Mac App Store packages**: embedded provisioning profiles, Apple Distribution signing,
+  sandbox entitlement defaults.
+- **Ticket signatures**: stapled tickets are matched to the code, but Apple's signature over the
+  ticket itself isn't checked.
 - **Codesign extras** not covered: detached signatures, `--preserve-metadata`, launch
   constraints, and disk images over 4 GB. Requirement `notarized`/`platform` clauses evaluate
-  false offline.
+  false offline. ZIP64 (submissions over 4 GB) and S3 multipart uploads (over 5 GB).
 
 ## Manual checks
 
@@ -123,5 +175,8 @@ cargo test                 # unit tests (vectors, round trips) + macOS oracle te
 packages through the public API, and checks them with Apple's tools. `oracle_codesign.rs` checks
 certificate signatures, legacy dual CodeDirectories, disk-image signatures and the CLI's codesign
 command lines with `codesign`; `oracle_crypto.rs` checks keys, certificates, PKCS#12 and
-requirements against `openssl` and `csreq`. One test signs with your real Keychain identity and
+requirements against `openssl` and `csreq`; `oracle_notary.rs` checks stapled disk images,
+installer signatures and submission ZIPs with `codesign`, `hdiutil`, `pkgutil`, `installer` and
+`ditto`. Its network test (`cargo test -- --ignored network`) staples a notarized package on
+this Mac and checks it with `stapler` and `spctl`. One test signs with your real Keychain identity and
 is opt-in: `cargo test -- --ignored keychain`.

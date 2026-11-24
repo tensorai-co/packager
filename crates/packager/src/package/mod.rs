@@ -98,6 +98,12 @@ impl Package {
     pub fn notarized(&self) -> bool {
         self.notarized
     }
+    /// Re-reads size and hash after stapling, and marks it notarized.
+    pub(crate) fn mark_notarized(&mut self) -> Result<()> {
+        let fresh = if self.path.is_dir() { Package::dir(self.kind, self.arch.clone(), self.path.clone(), self.signed)? } else { Package::file(self.kind, self.arch.clone(), self.path.clone(), self.signed)? };
+        *self = Package { notarized: true, ..fresh };
+        Ok(())
+    }
 }
 
 /// What each builder gets while running.

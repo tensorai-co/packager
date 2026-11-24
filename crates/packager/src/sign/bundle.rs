@@ -76,7 +76,11 @@ fn layout(bundle: &Path) -> Result<Layout> {
         .get_str("CFBundleIdentifier")
         .ok_or_else(|| Error::invalid("app", "CFBundleIdentifier", format!("is missing from {}", info_plist.display())))?
         .to_string();
-    let executable = info.get_str("CFBundleExecutable").map(|e| exe_dir.join(e));
+    // Without CFBundleExecutable, CoreFoundation uses the bundle's own name.
+    let executable = match info.get_str("CFBundleExecutable") {
+        Some(e) => Some(exe_dir.join(e)),
+        None => bundle.file_stem().map(|n| exe_dir.join(n)).filter(|p| p.is_file()),
+    };
     Ok(Layout { content, info_plist, executable, identifier })
 }
 

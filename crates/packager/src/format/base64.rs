@@ -18,6 +18,16 @@ pub fn encode(data: &[u8]) -> String {
     out
 }
 
+/// URL-safe base64 without padding (RFC 4648 §5), as JWTs use.
+pub fn encode_url(data: &[u8]) -> String {
+    encode(data).trim_end_matches('=').replace('+', "-").replace('/', "_")
+}
+
+/// Decodes URL-safe or standard base64, with or without padding.
+pub fn decode_url(s: &str) -> Result<Vec<u8>> {
+    decode(&s.replace('-', "+").replace('_', "/"))
+}
+
 /// Decodes `s`, ignoring whitespace.
 pub fn decode(s: &str) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
