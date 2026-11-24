@@ -8,6 +8,7 @@ pub mod der;
 pub mod ec;
 pub mod hmac;
 pub mod keys;
+pub mod md5;
 pub mod pkcs12;
 pub mod rsa;
 pub mod sha1;

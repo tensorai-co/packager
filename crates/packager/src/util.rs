@@ -32,6 +32,18 @@ pub fn iso8601(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", t / 3600, t / 60 % 60, t % 60)
 }
 
+/// `secs` since the Unix epoch as an RFC 2822 date (`Tue, 01 Jan 1980 00:00:00 +0000`), as
+/// Debian changelogs write them.
+pub fn rfc2822(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    // 1970-01-01 was a Thursday.
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][m as usize - 1];
+    let t = secs.rem_euclid(86_400);
+    format!("{wd}, {d:02} {mon} {y} {:02}:{:02}:{:02} +0000", t / 3600, t / 60 % 60, t % 60)
+}
+
 /// Big-endian appends.
 pub(crate) trait PutBe {
     fn u8(&mut self, v: u8);
@@ -200,5 +212,7 @@ mod tests {
         assert_eq!(super::iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(super::iso8601(315_532_800), "1980-01-01T00:00:00Z");
         assert_eq!(super::iso8601(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(super::rfc2822(315_532_800), "Tue, 01 Jan 1980 00:00:00 +0000");
+        assert_eq!(super::rfc2822(1_700_000_000), "Tue, 14 Nov 2023 22:13:20 +0000");
     }
 }

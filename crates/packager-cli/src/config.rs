@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use packager::package::{AppBundle, Dmg, Msi, Msix, MsixBundle, Pkg};
+use packager::package::{AppBundle, Confinement, Deb, DebCompression, Dmg, Msi, Msix, MsixBundle, Pkg, Snap};
 use packager::{App, Arch};
 
 use crate::toml::{self, Toml};
@@ -16,6 +16,8 @@ pub struct Config {
     pub msix: Option<Msix>,
     pub msi: Option<Msi>,
     pub msixbundle: Option<MsixBundle>,
+    pub deb: Option<Deb>,
+    pub snap: Option<Snap>,
     pub app_package: bool,
     pub apple: Option<packager::sign::Apple>,
     pub authenticode: Option<packager::sign::Authenticode>,
@@ -114,7 +116,12 @@ pub fn load(path: &Path) -> Result<Config, String> {
     }
     if let Some(r) = a.get("file_types") {
         for item in r.as_array().ok_or("`app.file_types` must be an array of { extension, name }")? {
-            app = app.file_type(req(item, "extension", "app.file_types")?, req(item, "name", "app.file_types")?);
+            check_keys(item, &["extension", "name", "mime_type"], "app.file_types")?;
+            let (ext, name) = (req(item, "extension", "app.file_types")?, req(item, "name", "app.file_types")?);
+            app = match s(item, "mime_type", "app.file_types")? {
+                Some(m) => app.file_type_mime(ext, name, m),
+                None => app.file_type(ext, name),
+            };
         }
     }
 
@@ -264,7 +271,135 @@ pub fn load(path: &Path) -> Result<Config, String> {
             Some(x)
         }
     };
-    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none() && msix.is_none() && msi.is_none() && msixbundle.is_none());
+    let linux_archs = |t: &Toml, ctx: &str| -> Result<Vec<Arch>, String> {
+        strings(t, "archs", ctx)?.iter().map(|a| Arch::parse(a).ok_or_else(|| format!("unknown architecture `{a}` in {ctx}.archs"))).collect()
+    };
+    let deb = match section("deb") {
+        None => None,
+        Some(d) => {
+            let ctx = "package.deb";
+            check_keys(d, &["name", "revision", "maintainer", "depends", "recommends", "auto_depends", "section", "priority", "homepage", "license", "copyright_file", "install_dir", "bin_link", "desktop_entry", "categories", "keywords", "terminal", "compression", "archs", "preinst", "postinst", "prerm", "postrm", "man_page"], ctx)?;
+            let mut x = Deb::new();
+            if let Some(v) = s(d, "name", ctx)? {
+                x = x.name(v);
+            }
+            if let Some(v) = s(d, "revision", ctx)? {
+                x = x.revision(v);
+            }
+            if let Some(v) = s(d, "maintainer", ctx)? {
+                x = x.maintainer(v);
+            }
+            x = x.depends(strings(d, "depends", ctx)?).recommends(strings(d, "recommends", ctx)?);
+            if d.get("auto_depends").and_then(Toml::as_bool) == Some(false) {
+                x = x.no_auto_depends();
+            }
+            if let Some(v) = s(d, "section", ctx)? {
+                x = x.section(v);
+            }
+            if let Some(v) = s(d, "priority", ctx)? {
+                x = x.priority(v);
+            }
+            if let Some(v) = s(d, "homepage", ctx)? {
+                x = x.homepage(v);
+            }
+            if let Some(v) = s(d, "license", ctx)? {
+                x = x.license(v);
+            }
+            if let Some(v) = s(d, "copyright_file", ctx)? {
+                x = x.copyright_file(rel(v));
+            }
+            if let Some(v) = s(d, "install_dir", ctx)? {
+                x = x.install_dir(v);
+            }
+            if d.get("bin_link").and_then(Toml::as_bool) == Some(false) {
+                x = x.no_bin_link();
+            }
+            if d.get("desktop_entry").and_then(Toml::as_bool) == Some(false) {
+                x = x.no_desktop_entry();
+            }
+            if d.get("categories").is_some() {
+                x = x.categories(strings(d, "categories", ctx)?);
+            }
+            x = x.keywords(strings(d, "keywords", ctx)?);
+            if d.get("terminal").and_then(Toml::as_bool) == Some(true) {
+                x = x.terminal();
+            }
+            match s(d, "compression", ctx)? {
+                None | Some("gzip") => {}
+                Some("xz") => x = x.compression(DebCompression::Xz),
+                Some(o) => return Err(format!("package.deb.compression: `{o}` must be `gzip` or `xz`")),
+            }
+            if let Some(v) = s(d, "man_page", ctx)? {
+                x = x.man_page(rel(v));
+            }
+            for kind in ["preinst", "postinst", "prerm", "postrm"] {
+                if let Some(v) = s(d, kind, ctx)? {
+                    x = x.script(kind, rel(v));
+                }
+            }
+            let archs = linux_archs(d, ctx)?;
+            if !archs.is_empty() {
+                x = x.archs(archs);
+            }
+            Some(x)
+        }
+    };
+    let snap = match section("snap") {
+        None => None,
+        Some(d) => {
+            let ctx = "package.snap";
+            check_keys(d, &["name", "summary", "title", "base", "grade", "confinement", "plugs", "extra_plugs", "license", "cli", "categories", "keywords", "environment", "archs"], ctx)?;
+            let mut x = Snap::new();
+            if d.get("cli").and_then(Toml::as_bool) == Some(true) {
+                x = x.cli();
+            }
+            if let Some(v) = s(d, "name", ctx)? {
+                x = x.name(v);
+            }
+            if let Some(v) = s(d, "summary", ctx)? {
+                x = x.summary(v);
+            }
+            if let Some(v) = s(d, "title", ctx)? {
+                x = x.title(v);
+            }
+            if let Some(v) = s(d, "base", ctx)? {
+                x = x.base(v);
+            }
+            if let Some(v) = s(d, "grade", ctx)? {
+                x = x.grade(v);
+            }
+            match s(d, "confinement", ctx)? {
+                None | Some("strict") => {}
+                Some("classic") => x = x.confinement(Confinement::Classic),
+                Some("devmode") => x = x.confinement(Confinement::Devmode),
+                Some(o) => return Err(format!("package.snap.confinement: `{o}` must be `strict`, `classic` or `devmode`")),
+            }
+            if d.get("plugs").is_some() {
+                x = x.plugs(strings(d, "plugs", ctx)?);
+            }
+            for p in strings(d, "extra_plugs", ctx)? {
+                x = x.plug(p);
+            }
+            if let Some(v) = s(d, "license", ctx)? {
+                x = x.license(v);
+            }
+            if d.get("categories").is_some() {
+                x = x.categories(strings(d, "categories", ctx)?);
+            }
+            x = x.keywords(strings(d, "keywords", ctx)?);
+            if let Some(env) = d.get("environment") {
+                for (k, v) in env.as_table().ok_or("`package.snap.environment` must be a table of NAME = \"value\"")? {
+                    x = x.env(k.clone(), v.as_str().ok_or_else(|| format!("`package.snap.environment.{k}` must be a string"))?);
+                }
+            }
+            let archs = linux_archs(d, ctx)?;
+            if !archs.is_empty() {
+                x = x.archs(archs);
+            }
+            Some(x)
+        }
+    };
+    let app_package = section("app").is_some() || (dmg.is_none() && pkg.is_none() && msix.is_none() && msi.is_none() && msixbundle.is_none() && deb.is_none() && snap.is_none());
 
     let apple = match root.get("sign").and_then(|s| s.get("apple")) {
         None => None,
@@ -364,7 +499,7 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .transpose()?
         .flatten()
         .unwrap_or_else(|| base.join("target/dist"));
-    Ok(Config { app, app_bundle, dmg, pkg, msix, msi, msixbundle, app_package, apple, authenticode, notarize, out_dir })
+    Ok(Config { app, app_bundle, dmg, pkg, msix, msi, msixbundle, deb, snap, app_package, apple, authenticode, notarize, out_dir })
 }
 
 fn toml_to_plist(v: &Toml) -> Option<packager::format::plist::Value> {

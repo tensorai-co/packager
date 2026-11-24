@@ -11,8 +11,10 @@ or `sips`.
 
 **Windows.** `.msi`, `.msix` and `.msixbundle` packages are built and signed, and `.exe` files get
 their icon, version information and manifest (what `rcedit` does) and an Authenticode signature,
-without WiX, `makeappx`, `signtool` or `rcedit`. Debian/Ubuntu come next (see
-`proposed_packager_rs.md`).
+without WiX, `makeappx`, `signtool` or `rcedit`.
+
+**Linux.** `.deb` (Debian/Ubuntu) and `.snap` packages are built without `dpkg-deb`, `snapcraft`
+or `mksquashfs`, from any host: the tar, `ar`, xz (LZMA2) and SquashFS writers are in the repo.
 
 | Package | What's written | Checked against (CI oracles, never runtime deps) |
 | --- | --- | --- |
@@ -23,6 +25,8 @@ without WiX, `makeappx`, `signtool` or `rcedit`. Debian/Ubuntu come next (see
 | `.exe` / `.dll` | Icon group (`.ico` from one PNG), `VS_VERSIONINFO`, manifest, in a rebuilt `.rsrc`; Authenticode (SHA-256, RFC 3161 timestamp), PE checksum | `Get-AuthenticodeSignature`, `signtool verify`, `signtool`-signed files read back, running it |
 | `.msi` | Compound File (mini stream, DIFAT, red-black directory), string pool and column-major tables, `\x05SummaryInformation`, MSZIP cabinet in a stream; one component per file, Start menu shortcut (own HKCU-keyed component), URL schemes and file types, ARP icon, major upgrade with downgrade block; per-machine or per-user; optional install wizard; `_Validation` table; cabinets split at 1 GiB; Authenticode in `\x05DigitalSignature` with `\x05MsiDigitalSignatureEx` | ICE validation (`darice.cub` via WiX `smoke`: 0 errors, 0 warnings), Windows Installer's COM API, `Get-AuthenticodeSignature`, `signtool`-signed MSIs read back, `msiexec` install / upgrade / downgrade / uninstall |
 | `.msixbundle` | Signed per-architecture `.msix` packages stored as is, `AppxBundleManifest.xml` (offsets, device family), block map, bundle signature | `Get-AuthenticodeSignature`, `makeappx unbundle`, `Add-AppxPackage` |
+| `.deb` | `ar` of `debian-binary`, `control.tar` (`control` with `Depends: libc6 (>= …)` read from the binary's symbol versions, `Installed-Size`, `md5sums`, optional maintainer scripts) and `data.tar` (gzip or xz): the app in `/opt/<name>`, `/usr/bin` link, `.desktop` entry named after the identifier, hicolor icons, shared-mime-info types, `copyright`, `changelog`, optional man page | `dpkg-deb --info`/`-x`/`-e`, `md5sum -c`, `lintian` (no errors or warnings), `desktop-file-validate`, `apt install` / upgrade / downgrade refusal / `apt remove`, the MIME and URL-scheme caches |
+| `.snap` | SquashFS 4.0 (xz, no fragments, root-owned, 4 KiB padded) with `meta/snap.yaml` (base, confinement, plugs, grade), `meta/gui/<app>.desktop` and `icon.png`, the app at `$SNAP` | `unsquashfs -s`/`-lls`/extraction, `review-tools` (the Snap Store's review: no errors or warnings besides the repack check below), kernel mount via `snap install --dangerous`, running it, desktop export, interface connections, refresh, `snap remove` |
 | `.msix` | Signed exe, app files, logos from the icon, `AppxManifest.xml` (full trust, URL schemes, file types; `Publisher` from the certificate), `AppxBlockMap.xml`, `[Content_Types].xml`, `AppxSignature.p7x`, ZIP64 end records like `makeappx` | `Get-AuthenticodeSignature`, `makeappx unpack`, `makeappx`+`signtool` packages read back |
 
 Output is deterministic: same input, byte-identical packages (`SOURCE_DATE_EPOCH`, default
@@ -61,7 +65,8 @@ for p in out.packages() {
 ```
 
 Each layer works on its own: `format::{plist, png, icns, macho, cpio, xar, bom, hfsplus, udif,
-ds_store, zip, json}`, `compress::{deflate, zlib, gzip}`, `crypto::{sha1, sha256, crc}`,
+ds_store, zip, json, tar, ar, elf, squashfs}`, `compress::{deflate, zlib, gzip, lzma, xz}`,
+`crypto::{sha1, sha256, md5, crc}`,
 `crypto::{rsa, ec, x509, pkcs12, der, sigv4, …}`, `sign::apple::{sign_macho, verify_macho}`,
 `sign::bundle::{sign_bundle, verify_bundle}`, `sign::disk_image`, `sign::installer`,
 `sign::requirement`, `sign::assess`, `notary`, `staple`.
@@ -149,6 +154,62 @@ sideloading, `Add-AppxPackage` installs the package (no `resources.pri` needed),
 entry, URL scheme, file type and execution alias are registered, the app runs through its alias,
 a higher version upgrades it, a lower one is refused, and `Remove-AppxPackage` removes it all.
 
+## Linux
+
+```rust
+use packager::package::{Deb, Snap};
+
+let app = app
+    .binary(Arch::LinuxX64, "target/x86_64-unknown-linux-gnu/release/my-app")
+    .binary(Arch::LinuxArm64, "target/aarch64-unknown-linux-gnu/release/my-app");
+packager::build(&app)
+    .package(Deb::new()                                  // one .deb per Linux binary
+        .maintainer("Example Ltd <packages@example.com>")
+        .depends(["libwebkit2gtk-4.1-0"]))               // libc6 (>= …) is added for you
+    .package(Snap::new().license("MIT"))                 // one .snap per Linux binary
+    .run()?;
+```
+
+```sh
+packager build --only deb,snap
+packager verify dist/myapp_1.4.0_amd64.deb    # members, control fields, md5sums
+packager verify dist/myapp_1.4.0_amd64.snap   # every SquashFS block, snap.yaml
+packager inspect dist/myapp_1.4.0_amd64.snap  # tree with modes and owners, then snap.yaml
+packager inspect my-app                       # ELF: architecture, interpreter, libraries, glibc
+```
+
+Names and versions are derived: the package and snap name is the identifier's last part
+(`com.example.myapp` → `myapp`), a pre-release sorts before its release on Debian (`1.4.0-beta.1`
+→ `1.4.0~beta.1`) and makes the snap's grade `devel`, and build metadata is dropped. File types
+with a well-known extension join the system's MIME type (`md` → `text/markdown`); others get
+`application/x-<name>-<ext>`, defined in a shared-mime-info file; URL schemes become
+`x-scheme-handler/<scheme>`. `dpkg`'s triggers update the menu, icon and MIME caches, so no
+maintainer scripts are needed. Neither format is signed as a file: Debian signs repositories, and
+the Snap Store signs what's uploaded (`snap install --dangerous` installs a local file).
+
+Checked on Ubuntu 24.04: lintian reports no errors or warnings (in `/usr/lib/<name>` with no
+suppressions; in `/opt/<name>`, the default, its distro-only `dir-or-file-in-opt` rule is
+suppressed); `apt` installs, the command runs, the URL scheme and custom MIME type are registered,
+a newer version upgrades it, an older one is refused without `--allow-downgrades`, and `apt
+remove` leaves nothing behind. `snap install --dangerous` mounts the image, the app runs
+confined, snapd exports the menu entry and connects the desktop plugs, a newer snap refreshes it,
+and `snap remove` cleans up. Our xz streams decode with `xz`, our SquashFS images with
+`unsquashfs` and the kernel, and our readers read theirs.
+
+**Not done yet (Linux):**
+- **Snap Store uploads.** The Store repacks every snap with its own `mksquashfs` and liblzma and
+  wants byte-identical output (`squashfs_repack_checksum`). Our xz encoder is valid but doesn't
+  reproduce liblzma's bytes, so uploads fail that one check; `review-tools` passes everything
+  else. Matching needs liblzma's exact encoder (preset 6, BT4 match finder, optimal parsing) and
+  `mksquashfs`'s exact layout.
+- **GTK/WebKit apps in strict snaps.** `core24` has no GTK or WebKit; snapcraft's `gnome`
+  extension adds them through a content snap and a launcher. Until that's built, such apps need
+  `confinement = "classic"` (host libraries; needs Store approval) or their libraries bundled as
+  resources.
+- **`Depends` beyond glibc.** Other libraries are declared by hand (`depends`); mapping sonames to
+  packages like `dpkg-shlibdeps` needs a package database.
+- **RPM** and other distro families are out of scope (see the proposal's non-goals).
+
 ## Notarization, stapling and Gatekeeper
 
 What `notarytool`, `stapler`, `productsign` and `spctl -a` do, in Rust:
@@ -227,7 +288,7 @@ positions as written, and the installed app verifies and runs.
 ## Tests
 
 ```sh
-cargo test                 # unit tests (vectors, round trips) + macOS oracle tests
+cargo test                 # unit tests (vectors, round trips) + oracle tests for this OS
 ```
 
 `crates/packager/tests/oracle_macos.rs` compiles a universal binary with `cc`, builds all three
@@ -240,7 +301,12 @@ installer signatures and submission ZIPs with `codesign`, `hdiutil`, `pkgutil`, 
 `Get-AuthenticodeSignature`, `makeappx` and Windows Installer's COM API; opt-in tests run
 `msiexec` (`cargo test -- --ignored msi_installs`, elevated) and (`cargo test -- --ignored
 msix_installs`, with `PACKAGER_MSIX_CERT`/`PACKAGER_MSIX_KEY` naming a sideload-trusted
-certificate) installs, runs, upgrades and removes a package. The notary tests' network test
+certificate) installs, runs, upgrades and removes a package. `oracle_linux.rs` checks xz against
+`xz` (any host), and on Linux SquashFS against `unsquashfs`/`mksquashfs`, `.deb` files with
+`dpkg-deb`, `lintian` and `desktop-file-validate`, and snaps with `review-tools`; opt-in tests
+(`cargo test --test oracle_linux -- --ignored`, passwordless `sudo`) install, run, upgrade and
+remove both with `apt` and `snap`. `scripts/vm-sync.sh` copies the tree to a Linux VM for them.
+The notary tests' network test
 (`cargo test -- --ignored network`) staples a notarized package on
 this Mac and checks it with `stapler` and `spctl`. One test signs with your real Keychain identity and
 is opt-in: `cargo test -- --ignored keychain`.

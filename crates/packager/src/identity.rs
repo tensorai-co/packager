@@ -90,8 +90,108 @@ pub fn msi_product_code(app: &App, arch: crate::app::Arch) -> Result<String> {
     Ok(guid(&format!("msi-product:{}:{}:{}", app.identifier, msi_version(app)?, arch.name())))
 }
 
+/// The last part of the identifier, lowercased: what Linux package names start from
+/// (`com.example.MyApp` → `myapp`).
+fn base_name(app: &App) -> String {
+    app.identifier.rsplit('.').next().unwrap_or(&app.identifier).to_ascii_lowercase()
+}
+
+/// Checks a Debian package name: lowercase letters, digits, `+`, `-` and `.`, at least two
+/// characters, starting with a letter or digit.
+pub fn check_deb_name(name: &str) -> Result<()> {
+    let ok = name.len() >= 2 && name.bytes().next().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-.".contains(&b));
+    if ok { Ok(()) } else { Err(Error::invalid("deb", "name", format!("`{name}` must be 2+ lowercase letters, digits, `+`, `-` or `.`, starting with a letter or digit"))) }
+}
+
+/// The Debian package name: given, else the identifier's last part (`myapp`).
+pub fn deb_name(app: &App, explicit: Option<&str>) -> Result<String> {
+    let name = explicit.map(String::from).unwrap_or_else(|| base_name(app).chars().map(|c| if c.is_ascii_alphanumeric() || "+-.".contains(c) { c } else { '-' }).collect());
+    check_deb_name(&name)?;
+    Ok(name)
+}
+
+/// The Debian `Version`: `upstream[-revision]`. A pre-release sorts before its release with
+/// `~` (`1.4.0-beta.1` → `1.4.0~beta.1`); build metadata is dropped, as it doesn't order.
+pub fn deb_version(app: &App, revision: Option<&str>) -> Result<String> {
+    let v = app.parsed_version()?;
+    let mut s = v.triple();
+    if let Some(pre) = &v.pre {
+        if !pre.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
+            return Err(Error::invalid("deb", "version", format!("pre-release `{pre}` must be letters, digits, `.` and `-`")));
+        }
+        s.push('~');
+        s.push_str(&pre.replace('-', "."));
+    }
+    if let Some(r) = revision {
+        if r.is_empty() || !r.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.~".contains(&b)) {
+            return Err(Error::invalid("deb", "revision", format!("`{r}` must be letters, digits, `+`, `.` or `~`")));
+        }
+        s.push('-');
+        s.push_str(r);
+    }
+    Ok(s)
+}
+
+/// Checks a snap name: 2–40 characters of lowercase letters, digits and `-`, with at least one
+/// letter, and no leading, trailing or doubled `-`.
+pub fn check_snap_name(name: &str) -> Result<()> {
+    let ok = (2..=40).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && name.bytes().any(|b| b.is_ascii_lowercase())
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--");
+    if ok { Ok(()) } else { Err(Error::invalid("snap", "name", format!("`{name}` must be 2–40 lowercase letters, digits and single `-`, with a letter, not starting or ending with `-`"))) }
+}
+
+/// The snap name: given, else the identifier's last part (`myapp`).
+pub fn snap_name(app: &App, explicit: Option<&str>) -> Result<String> {
+    let name = explicit.map(String::from).unwrap_or_else(|| {
+        let raw: String = base_name(app).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let mut out = String::new();
+        for c in raw.chars() {
+            if !(c == '-' && (out.is_empty() || out.ends_with('-'))) {
+                out.push(c);
+            }
+        }
+        out.trim_end_matches('-').to_string()
+    });
+    check_snap_name(&name)?;
+    Ok(name)
+}
+
+/// The snap `version`: the version as given without build metadata (`1.4.0`, `1.4.0-beta.1`),
+/// at most 32 characters from `[a-zA-Z0-9.+~-]`, starting and ending with a letter or digit.
+pub fn snap_version(app: &App) -> Result<String> {
+    let v = app.parsed_version()?;
+    let s = match &v.pre {
+        Some(p) => format!("{}-{p}", v.triple()),
+        None => v.triple(),
+    };
+    let ok = s.len() <= 32 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"+.~-:".contains(&b)) && s.bytes().last().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'~');
+    if ok { Ok(s) } else { Err(Error::invalid("snap", "version", format!("`{s}` must be at most 32 characters of letters, digits, `.`, `+`, `~` and `-`"))) }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linux_names_and_versions() {
+        let a = App::new("My App", "com.example.MyApp", "1.4.0-beta.1+42");
+        assert_eq!(deb_name(&a, None).unwrap(), "myapp");
+        assert_eq!(snap_name(&a, None).unwrap(), "myapp");
+        assert_eq!(deb_version(&a, None).unwrap(), "1.4.0~beta.1");
+        assert_eq!(deb_version(&a, Some("1")).unwrap(), "1.4.0~beta.1-1");
+        assert_eq!(snap_version(&a).unwrap(), "1.4.0-beta.1");
+        let b = App::new("B", "io.x.my_cool--app", "2.0.0");
+        assert_eq!(snap_name(&b, None).unwrap(), "my-cool-app");
+        assert_eq!(deb_name(&b, None).unwrap(), "my-cool--app");
+        assert!(snap_name(&b, Some("Bad")).is_err());
+        assert!(snap_name(&b, Some("123")).is_err());
+        assert!(deb_name(&b, Some("x")).is_err());
+        assert!(deb_version(&b, Some("a b")).is_err());
+        assert!(snap_version(&App::new("C", "com.x.c", format!("1.0.0-{}", "a".repeat(40)))).is_err());
+    }
+
     use super::*;
 
     #[test]

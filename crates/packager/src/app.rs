@@ -29,6 +29,10 @@ impl Arch {
     pub fn is_macos(self) -> bool {
         matches!(self, Arch::MacosArm64 | Arch::MacosX64 | Arch::MacosUniversal)
     }
+    /// Whether this is a Linux architecture.
+    pub fn is_linux(self) -> bool {
+        matches!(self, Arch::LinuxX64 | Arch::LinuxArm64)
+    }
     /// The name used in config files and output listings.
     pub fn name(self) -> &'static str {
         match self {
@@ -133,6 +137,9 @@ pub struct FileType {
     pub name: String,
     /// `Editor` or `Viewer`.
     pub role: String,
+    /// MIME type (`text/markdown`), for Linux. When unset, well-known extensions map to their
+    /// standard type and others get `application/x-<package>-<extension>`.
+    pub mime_type: Option<String>,
 }
 
 /// Resources copied into the app: a file or directory, and where it goes.
@@ -237,7 +244,13 @@ impl App {
     /// Registers a document type the app edits.
     pub fn file_type(mut self, extension: impl Into<String>, name: impl Into<String>) -> Self {
         let extension = extension.into().trim_start_matches('.').to_string();
-        self.file_types.push(FileType { extension, name: name.into(), role: "Editor".into() });
+        self.file_types.push(FileType { extension, name: name.into(), role: "Editor".into(), mime_type: None });
+        self
+    }
+    /// Registers a document type with its MIME type (used on Linux).
+    pub fn file_type_mime(mut self, extension: impl Into<String>, name: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        let extension = extension.into().trim_start_matches('.').to_string();
+        self.file_types.push(FileType { extension, name: name.into(), role: "Editor".into(), mime_type: Some(mime_type.into()) });
         self
     }
     /// Sets the copyright line.
@@ -267,6 +280,11 @@ impl App {
         self.binaries.iter().filter(|(a, _)| a.is_macos()).map(|(a, p)| (*a, p.as_path())).collect()
     }
 
+    /// The binaries for Linux.
+    pub fn linux_binaries(&self) -> Vec<(Arch, &Path)> {
+        self.binaries.iter().filter(|(a, _)| a.is_linux()).map(|(a, p)| (*a, p.as_path())).collect()
+    }
+
     /// Checks the fields every format needs.
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
@@ -282,6 +300,14 @@ impl App {
             return Err(Error::invalid("app", "identifier", format!("`{}` must be reverse-DNS like `com.example.myapp` (letters, digits, `-`)", self.identifier)));
         }
         self.parsed_version()?;
+        for f in &self.file_types {
+            if let Some(m) = &f.mime_type {
+                let ok = m.split_once('/').is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !b.contains('/')) && m.bytes().all(|c| c.is_ascii_alphanumeric() || b"/.+-_".contains(&c));
+                if !ok {
+                    return Err(Error::invalid("app", "file_types", format!("`{m}` isn't a MIME type like `text/markdown`")));
+                }
+            }
+        }
         for s in &self.url_schemes {
             let ok = s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c));

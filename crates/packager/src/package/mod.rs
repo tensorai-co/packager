@@ -1,21 +1,26 @@
 //! The high-level builders: each maps an [`App`](crate::App) to one package format.
 
 pub mod app_bundle;
+pub mod deb;
 pub mod dmg;
+pub mod linux;
 pub mod msi;
 mod msi_ui;
 pub mod msix;
 pub mod pkg;
+pub mod snap;
 pub mod windows;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub use app_bundle::AppBundle;
+pub use deb::{Deb, DebCompression};
 pub use dmg::Dmg;
 pub use msi::Msi;
 pub use msix::{Msix, MsixBundle};
 pub use pkg::Pkg;
+pub use snap::{Confinement, Snap};
 
 use crate::app::App;
 use crate::crypto::{hex, Sha256};
@@ -38,6 +43,10 @@ pub enum PackageKind {
     Msi,
     /// A Windows MSIX bundle (several architectures).
     MsixBundle,
+    /// A Debian/Ubuntu package.
+    Deb,
+    /// A snap (Ubuntu and other snapd systems).
+    Snap,
 }
 
 impl fmt::Display for PackageKind {
@@ -49,6 +58,8 @@ impl fmt::Display for PackageKind {
             PackageKind::Msix => "msix",
             PackageKind::Msi => "msi",
             PackageKind::MsixBundle => "msixbundle",
+            PackageKind::Deb => "deb",
+            PackageKind::Snap => "snap",
         })
     }
 }

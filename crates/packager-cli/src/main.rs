@@ -14,17 +14,17 @@ use packager::sign::apple::{verify_macho, CS_ADHOC, CS_RUNTIME};
 use packager::sign::bundle::verify_bundle;
 
 const USAGE_TEMPLATE: &str = "\
-packager — native macOS packages from scratch, no platform tools needed
+packager — native macOS, Windows and Linux packages from scratch, no platform tools needed
 
 USAGE:
-    packager build [--config packager.toml] [--only app,dmg,pkg] [--out DIR]
+    packager build [--config packager.toml] [--only app,dmg,pkg,msi,msix,msixbundle,deb,snap] [--out DIR]
     packager sign <file|bundle>... [-s IDENTITY | --p12 FILE | --cert FILE --key FILE]
                   [-i ID] [--hardened-runtime] [--entitlements FILE] [-r REQS] [--timestamp[=URL|none]]
     packager codesign …                codesign's own command line (sign, -v verify, -d display)
     packager identities                code-signing identities in the keychain
 {DISTRIBUTE}
     packager verify <file|bundle>      signatures and structure, without native tools
-    packager inspect <file|bundle>     what's inside a .dmg, .pkg, .app or Mach-O file
+    packager inspect <file|bundle>     what's inside a .dmg, .pkg, .app, .deb, .snap, Mach-O or ELF file
     packager icns <icon.png> <out.icns>
     packager --version
 
@@ -125,8 +125,8 @@ fn build(args: &[String]) -> Result<(), String> {
     let only: Option<Vec<&str>> = a.value("only").map(|o| o.split(',').map(str::trim).collect());
     if let Some(o) = &only {
         for k in o {
-            if !["app", "dmg", "pkg", "msix", "msixbundle", "msi"].contains(k) {
-                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix, msixbundle, msi)"));
+            if !["app", "dmg", "pkg", "msix", "msixbundle", "msi", "deb", "snap"].contains(k) {
+                return Err(format!("--only: unknown package kind `{k}` (app, dmg, pkg, msix, msixbundle, msi, deb, snap)"));
             }
         }
     }
@@ -160,8 +160,16 @@ fn build(args: &[String]) -> Result<(), String> {
         b = b.package(cfg.msi.clone().unwrap_or_default());
         any = true;
     }
+    if want("deb", cfg.deb.is_some()) {
+        b = b.package(cfg.deb.clone().unwrap_or_default());
+        any = true;
+    }
+    if want("snap", cfg.snap.is_some()) {
+        b = b.package(cfg.snap.clone().unwrap_or_default());
+        any = true;
+    }
     if !any {
-        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msixbundle] / [package.msi], or pass --only".into());
+        return Err("nothing to build: add [package.dmg] / [package.pkg] / [package.app] / [package.msix] / [package.msixbundle] / [package.msi] / [package.deb] / [package.snap], or pass --only".into());
     }
     if let Some(apple) = cfg.apple {
         b = b.sign(apple);
@@ -308,13 +316,39 @@ fn verify(args: &[String]) -> Result<(), String> {
                 }
             }
         }
+        "deb" => {
+            let info = packager::package::deb::read(&data).map_err(e)?;
+            let files = info.files.iter().filter(|f| matches!(f.kind, cpio::NodeKind::File(_))).count();
+            println!(
+                "{}: valid Debian package {} {} ({}), {files} files match md5sums; not signed (Debian signs repositories, not packages)",
+                path.display(),
+                info.field("Package").unwrap_or("?"),
+                info.field("Version").unwrap_or("?"),
+                info.field("Architecture").unwrap_or("?")
+            );
+        }
+        "snap" => {
+            let sb = packager::format::squashfs::info(&data).map_err(e)?;
+            let yaml = packager::package::snap::read_snap_yaml(&data).map_err(e)?;
+            let field = |k: &str| yaml.lines().find_map(|l| l.strip_prefix(&format!("{k}: "))).unwrap_or("?").trim_matches('\'').to_string();
+            println!(
+                "{}: valid snap {} {} ({} SquashFS, {} inodes, every block decompresses); confinement {}, base {}",
+                path.display(),
+                field("name"),
+                field("version"),
+                sb.compression.name(),
+                sb.inodes,
+                field("confinement"),
+                field("base")
+            );
+        }
         _ if data.starts_with(b"MZ") => return windows::verify(path),
         _ if macho::is_macho(&data) => {
             for s in verify_macho(&data).map_err(e)? {
                 println!("{}: {} valid ({}), identifier {}", path.display(), s.arch, if s.has_cms { "certificate" } else { "ad hoc" }, s.identifier);
             }
         }
-        _ => return Err(format!("{}: not a .dmg, .pkg, bundle or Mach-O file", path.display())),
+        _ => return Err(format!("{}: not a .dmg, .pkg, .msi, .msix, .deb, .snap, bundle, PE or Mach-O file", path.display())),
     }
     Ok(())
 }
@@ -370,6 +404,47 @@ fn inspect(args: &[String]) -> Result<(), String> {
         "dmg" => {
             let vol = udif::read(&data).map_err(e)?;
             println!("UDIF image: {} bytes compressed, {} bytes volume ({})", data.len(), vol.len(), String::from_utf8_lossy(&vol[1024..1026]));
+        }
+        "deb" => {
+            let info = packager::package::deb::read(&data).map_err(e)?;
+            for (k, v) in &info.control {
+                println!("{k}: {v}");
+            }
+            println!();
+            for f in &info.files {
+                let kind = match &f.kind {
+                    cpio::NodeKind::Dir => "d".to_string(),
+                    cpio::NodeKind::File(d) => format!("{}", d.len()),
+                    cpio::NodeKind::Symlink(t) => format!("-> {t}"),
+                };
+                println!("{:o} {}/{} {:>10} {}", f.perm, f.uid, f.gid, kind, f.path);
+            }
+        }
+        "snap" => {
+            let sb = packager::format::squashfs::info(&data).map_err(e)?;
+            println!("SquashFS 4.0, {} compression, {} KiB blocks, {} inodes, {} bytes used", sb.compression.name(), sb.block_size / 1024, sb.inodes, sb.bytes_used);
+            for f in packager::format::squashfs::read(&data).map_err(e)? {
+                let kind = match &f.kind {
+                    cpio::NodeKind::Dir => "d".to_string(),
+                    cpio::NodeKind::File(d) => format!("{}", d.len()),
+                    cpio::NodeKind::Symlink(t) => format!("-> {t}"),
+                };
+                println!("{:o} {}/{} {:>10} {}", f.perm, f.uid, f.gid, kind, f.path);
+            }
+            println!("\n{}", packager::package::snap::read_snap_yaml(&data).map_err(e)?);
+        }
+        _ if packager::format::elf::is_elf(&data) => {
+            let elf = packager::format::elf::Elf::parse(&data).map_err(e)?;
+            println!("ELF {}-bit, machine {} ({}), type {}", if elf.is_64 { 64 } else { 32 }, elf.machine, elf.debian_arch().unwrap_or("?"), elf.kind);
+            if let Some(i) = &elf.interpreter {
+                println!("interpreter: {i}");
+            }
+            for n in &elf.needed {
+                println!("needs: {n}");
+            }
+            if let Some((a, b, c)) = elf.min_glibc() {
+                println!("newest glibc symbol version: {a}.{b}{}", if c > 0 { format!(".{c}") } else { String::new() });
+            }
         }
         "icns" => {
             for ent in packager::format::icns::read(&data).map_err(e)? {

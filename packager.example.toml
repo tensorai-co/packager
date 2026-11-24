@@ -11,13 +11,15 @@ description = "Writes notes."
 copyright = "© 2026 Example Ltd"
 icon = "assets/icon.png"          # one PNG (1024×1024 ideally); .icns is generated
 url_schemes = ["myapp"]
-file_types = [{ extension = "md", name = "Markdown document" }]
+file_types = [{ extension = "md", name = "Markdown document" }]   # mime_type = "…" for Linux (optional)
 resources = [{ from = "dist/", to = "web" }]
 
 [app.binaries]
 macos-arm64 = "target/aarch64-apple-darwin/release/my-app"
 macos-x64 = "target/x86_64-apple-darwin/release/my-app"   # merged into a universal binary
 windows-x64 = "target/x86_64-pc-windows-msvc/release/my-app.exe"
+linux-x64 = "target/x86_64-unknown-linux-gnu/release/my-app"      # one .deb / .snap per Linux binary
+# linux-arm64 = "target/aarch64-unknown-linux-gnu/release/my-app"
 # macos-universal = "target/universal/release/my-app"
 
 [package.app]
@@ -49,6 +51,30 @@ install_location = "/Applications"
 # min_version = "10.0.17763.0"
 # background = "transparent"
 # execution_alias = "my-app"       # run as `my-app` from a terminal (command-line apps)
+
+[package.deb]                     # name_version_arch.deb; `Depends: libc6 (>= …)` is detected
+maintainer = "Example Ltd <packages@example.com>"
+# depends = ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+# homepage = "https://example.com"
+# license = "MIT"                   # in /usr/share/doc/<name>/copyright (default proprietary)
+# man_page = "docs/my-app.1"        # Debian wants one per command in /usr/bin
+# install_dir = "/opt/myapp"        # default; "/usr/lib/myapp" is the distro-style choice
+# categories = ["Utility"]          # freedesktop menu categories
+# compression = "xz"                # default gzip
+# revision = "1"                    # 1.4.0-1
+# name = "myapp"                    # default: the identifier's last part
+# postinst = "scripts/postinst"     # also preinst, prerm, postrm
+
+[package.snap]                    # name_version_arch.snap; install with `snap install --dangerous`
+# base = "core24"                   # default
+# confinement = "strict"            # strict (default), classic or devmode
+# extra_plugs = ["camera"]          # added to desktop, desktop-legacy, wayland, x11, opengl, audio-playback, network, home
+# plugs = ["home", "network"]       # replaces the default list
+# license = "MIT"                   # SPDX
+# summary = "Writes notes."         # ≤ 78 characters; default: the description's first line
+# grade = "stable"                  # default stable, devel for pre-releases
+# cli = true                        # no menu entry, home + network plugs
+# environment = { MY_VAR = "$SNAP/data" }
 
 [sign.apple]
 # "-" is ad hoc. Otherwise a keychain identity ("Developer ID Application: …", a unique part of

@@ -1,10 +1,14 @@
-//! DEFLATE plus the zlib (RFC 1950) and gzip (RFC 1952) framings.
+//! DEFLATE plus the zlib (RFC 1950) and gzip (RFC 1952) framings, and LZMA2 in the `.xz`
+//! container.
 
 pub mod deflate;
 pub mod inflate;
+pub mod lzma;
+pub mod xz;
 
 pub use deflate::{deflate, Level};
 pub use inflate::inflate;
+pub use xz::{unxz, xz};
 
 use crate::crypto::crc::{adler32, crc32};
 use crate::{Error, Result};
